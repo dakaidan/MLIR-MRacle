@@ -1,0 +1,7 @@
+.git
+build
+cmake-build-*
+fuzzing/artifacts
+fuzzing/corpus/generated
+fuzzing/findings
+fuzzing/tools

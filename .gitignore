@@ -1,0 +1,72 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# JetBrains IDEs
+.idea/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+cmake-build-*/
+
+.venv/
+*build*
+
+*.egg-info/
+dist/
+
+*eval*/
+
+*/**/__pycache__/
+
+iree-build-android/
+
+bin
+
+# Fuzzing output and generated corpora can become very large.
+fuzzing/artifacts/
+fuzzing/corpus/generated/
+fuzzing/findings/
+
+fuzzing/tools/
