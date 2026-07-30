@@ -40,7 +40,7 @@ RUN if [ "$ENABLE_VULKAN" = "ON" ]; then \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 
-ARG BUILD_CONQUER_OPT=ON
+ARG BUILD_CONQUER_OPT=OFF
 
 WORKDIR /workspace
 COPY . .

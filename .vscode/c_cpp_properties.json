@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/mlir-mr/include",
+                "/opt/homebrew/opt/llvm/include"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/mlir-mr"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            },
+            "intelliSenseMode": "macos-clang-arm64",
+            "compilerPath": "/opt/homebrew/opt/llvm/bin/clang++"
+        }
+    ],
+    "version": 4
+}
