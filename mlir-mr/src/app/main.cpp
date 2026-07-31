@@ -21,8 +21,6 @@
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 
-#include "llvm/Support/TargetSelect.h"
-
 #include "mlir-mr/backend/jit.h"
 
 #include <iostream>
@@ -79,10 +77,6 @@ int main(int argc, char **argv) {
 
     if (mlir::failed(mlir::applyFullConversion(*module, target, std::move(patterns))))
         return 1;
-
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
 
     // Translate MLIR module to LLVM IR
     auto llvmModule = mlir::translateModuleToLLVMIR(*module, llvmContext);

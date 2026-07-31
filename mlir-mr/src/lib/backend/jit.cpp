@@ -6,9 +6,18 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/TargetSelect.h"
+
 #include <utility>
 
 int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
+
+    // Init the native target and its components
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+
     // Set up the JIT compiler or error out if it fails
     auto jitOrErr = llvm::orc::LLJITBuilder().create();
     if (!jitOrErr) {
