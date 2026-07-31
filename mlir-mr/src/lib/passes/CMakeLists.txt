@@ -6,7 +6,7 @@ set_property(TARGET mlir_mr_passes PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET mlir_mr_passes PROPERTY CXX_EXTENSIONS OFF)
 
 target_include_directories(mlir_mr_passes INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../../include>
     ${MLIR_INCLUDE_DIRS}
 )
 

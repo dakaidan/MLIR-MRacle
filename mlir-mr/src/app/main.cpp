@@ -18,18 +18,22 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Target/LLVMIR/ModuleTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/raw_ostream.h"
-#include "mlir/Target/LLVMIR/ModuleTranslation.h"
-#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/Support/TargetSelect.h"
+
+#include "mlir-mr/backend/executor.h"
 
 #include <iostream>
 #include <string>
+#include <utility>
 
 int main(int argc, char **argv) {
 
@@ -69,6 +73,9 @@ int main(int argc, char **argv) {
 
     mlir::LLVMTypeConverter typeConverter(&mlirContext);
 
+    // Many conversion passes
+    // TODO: consider how to manager our own conversion passes and patterns
+    // I guess we can just do it manually before this
     mlir::RewritePatternSet patterns(&mlirContext);
     mlir::populateAffineToStdConversionPatterns(patterns);
     mlir::populateSCFToControlFlowConversionPatterns(patterns);
@@ -79,13 +86,19 @@ int main(int argc, char **argv) {
     if (mlir::failed(mlir::applyFullConversion(*module, target, std::move(patterns))))
         return 1;
 
-    // Translate to LLVM IR now that the module is in the LLVM dialect
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+    // Translate MLIR module to LLVM IR
     auto llvmModule = mlir::translateModuleToLLVMIR(*module, llvmContext);
     if (!llvmModule) {
-        llvm::errs() << "Translation to LLVM IR failed\n";
+        llvm::errs() << "LLVM IR translation failed\n";
         return 1;
     }
 
-    llvmModule->print(llvm::outs(), nullptr);
+    int ret = executeLLVMModuleWithJIT(std::move(llvmModule));
+    std::cout << "Execution returned: " << ret << "\n";
+
     return 0;
 }
