@@ -1,4 +1,4 @@
-add_library(mlir_mr_backend STATIC executor.cpp)
+add_library(mlir_mr_backend STATIC jit.cpp)
 add_library(MLIRMR::mlir_mr_backend ALIAS mlir_mr_backend)
 
 set_property(TARGET mlir_mr_backend PROPERTY CXX_STANDARD 23)

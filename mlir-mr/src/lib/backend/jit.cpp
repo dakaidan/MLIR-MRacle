@@ -1,4 +1,4 @@
-#include "mlir-mr/backend/executor.h"
+#include "mlir-mr/backend/jit.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
