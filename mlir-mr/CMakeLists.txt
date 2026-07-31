@@ -1,7 +1,5 @@
-# T
-op-level CMake for mlir-mr. Library and app are in src/lib and src/appenable_language(CXX)
+enable_language(CXX)
 
-# Library target lives in src/lib/ following the conquer-opt pattern.
 add_subdirectory(src/lib)
 
 # Provides a stable Docker build target while mlir_mr has no source files.

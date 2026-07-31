@@ -1,5 +1,8 @@
-# Header/source-free INTERFACE library while src/lib/ is empty.
-# Switch to STATIC and add *.cpp once the first implementation lands.
+# Subdirectory added here + sub-libraries below
+add_subdirectory(backend)
+add_subdirectory(cpu)
+add_subdirectory(passes)
+
 add_library(mlir_mr INTERFACE)
 add_library(MLIRMR::mlir_mr ALIAS mlir_mr)
 
@@ -12,6 +15,15 @@ target_include_directories(mlir_mr INTERFACE
     ${MLIR_INCLUDE_DIRS}
 )
 
+# Add sub-library deps here when creating new folders
+target_link_libraries(mlir_mr INTERFACE
+    mlir_mr_backend
+    mlir_mr_cpu
+    mlir_mr_passes
+)
+
+# Shared MLIR/LLVM deps
+# TODO: Migrate each to the lowest sub-library that needs it once that sub-library has its first .cpp source
 target_link_libraries(mlir_mr INTERFACE
     MLIRIR
     MLIRParser
@@ -21,4 +33,17 @@ target_link_libraries(mlir_mr INTERFACE
     MLIRTransforms
     MLIRTosaDialect
     MLIRArithDialect
+    LLVMCore
+    LLVMSupport
+    LLVMBinaryFormat
+    LLVMAsmPrinter
+    LLVMSupport
+    MLIRToLLVMIRTranslationRegistration
+    MLIRAffineToStandard
+    MLIRControlFlowToLLVM
+    MLIRFuncToLLVM
+    MLIRArithToLLVM
+    MLIRSCFToControlFlow
+    MLIRRegisterAllDialects
 )
+
