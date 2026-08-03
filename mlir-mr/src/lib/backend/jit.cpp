@@ -7,6 +7,8 @@
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TargetSelect.h"
+#include <llvm/IR/Constants.h>
+#include "llvm/ExecutionEngine/Orc/Core.h"
 
 #include <utility>
 
@@ -21,7 +23,8 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
     // Set up the JIT compiler or error out if it fails
     auto jitOrErr = llvm::orc::LLJITBuilder().create();
     if (!jitOrErr) {
-        llvm::errs() << "Failed to create JIT\n";
+        llvm::errs() << "Failed to create JIT: "
+                    << llvm::toString(jitOrErr.takeError()) << "\n";
         return 1;
     }
 
@@ -43,9 +46,8 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
         return 1;
     }
 
-    // TODO: exact byte outputs
-    // For now, assume the main function has the signature int main() and call it
-    auto *fn = sym->toPtr<int32_t(*)()>();
+    auto addr = sym->getValue();
+    auto *fn = llvm::jitTargetAddressToPointer<int32_t (*)()>(addr);
     int32_t ret = fn();
     return ret;
 }

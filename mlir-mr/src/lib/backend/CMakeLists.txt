@@ -7,10 +7,10 @@ set_property(TARGET mlir_mr_backend PROPERTY CXX_EXTENSIONS OFF)
 
 target_include_directories(mlir_mr_backend PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../../include>
-    ${MLIR_INCLUDE_DIRS}
 )
 
 target_link_libraries(mlir_mr_backend PUBLIC
+    llvm_mlir_headers
     LLVMCore
     LLVMSupport
     LLVMOrcJIT
@@ -18,3 +18,9 @@ target_link_libraries(mlir_mr_backend PUBLIC
     LLVMOrcTargetProcess
     LLVMExecutionEngine
 )
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+    target_link_libraries(mlir_mr_backend PUBLIC LLVMAArch64CodeGen)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64")
+    target_link_libraries(mlir_mr_backend PUBLIC LLVMX86CodeGen)
+endif()
