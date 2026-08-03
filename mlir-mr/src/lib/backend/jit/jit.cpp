@@ -1,11 +1,8 @@
-#include "mlir-mr/backend/jit.h"
+#include "mlir-mr/backend/jit/jit.h"
 
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TargetSelect.h"
 #include <llvm/IR/Constants.h>
 #include "llvm/ExecutionEngine/Orc/Core.h"
@@ -51,3 +48,4 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
     int32_t ret = fn();
     return ret;
 }
+

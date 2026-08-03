@@ -1,7 +1,7 @@
-# Subdirectory added here + sub-libraries below
 add_subdirectory(backend)
-add_subdirectory(cpu)
 add_subdirectory(passes)
+add_subdirectory(context)
+add_subdirectory(io)
 
 add_library(mlir_mr INTERFACE)
 add_library(MLIRMR::mlir_mr ALIAS mlir_mr)
@@ -14,36 +14,10 @@ target_include_directories(mlir_mr INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>
 )
 
-# Add sub-library deps here when creating new folders
 target_link_libraries(mlir_mr INTERFACE
     mlir_mr_backend
-    mlir_mr_cpu
     mlir_mr_passes
+    mlir_mr_context
+    mlir_mr_io
 )
 
-# Shared MLIR/LLVM deps
-# TODO: Migrate each to the lowest sub-library that needs it once that sub-library has its first .cpp source
-target_link_libraries(mlir_mr INTERFACE
-    llvm_mlir_headers
-    mlir_mr_backend
-    mlir_mr_cpu
-    mlir_mr_passes
-
-    # MLIR core & utilities, used in main.cpp (likely temp)
-    MLIRIR
-    MLIRParser
-    MLIRPass
-    MLIRSupport
-    MLIRTransforms
-
-    MLIRBuiltinToLLVMIRTranslation
-    MLIRRegisterAllDialects
-
-    # Dialect conversions used in main.cpp (likely temp)
-    MLIRBuiltinToLLVMIRTranslation
-    MLIRAffineToStandard
-    MLIRSCFToControlFlow
-    MLIRArithToLLVM
-    MLIRFuncToLLVM
-    MLIRLLVMToLLVMIRTranslation
-)
