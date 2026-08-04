@@ -14,5 +14,10 @@ add_dependencies(mlir-mr-smoke mlir_mr)
 # quantisation passes or custom dialect directly.
 # target_link_libraries(mlir_mr INTERFACE conquer_lib)
 
+# Must set MLIR_TABLEGEN_EXE and MLIR_TABLEGEN_TARGET to local vendored build
+# for MLIR to behave prperly and for mlir-mr to build properly.
+set(MLIR_TABLEGEN_EXE ${CMAKE_BINARY_DIR}/llvm_project_build/bin/mlir-tblgen)
+set(MLIR_TABLEGEN_TARGET mlir-tblgen)
 
+target_include_directories(mlir_mr INTERFACE ${CMAKE_CURRENT_BINARY_DIR})
 

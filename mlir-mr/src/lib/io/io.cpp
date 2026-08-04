@@ -19,7 +19,7 @@ std::string translateAndWriteToFile(mlir::ModuleOp module,
         return "";
     }
 
-    std::filesystem::path outDir = "test-outputs";
+    std::filesystem::path outDir = "test-outputs/litmus";
     std::filesystem::create_directories(outDir);
     std::filesystem::path outPath = outDir / filename;
 

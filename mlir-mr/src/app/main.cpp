@@ -12,6 +12,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Setup context
     mlir_mr::MLIRSetup setup;
 
     mlir::OwningOpRef<mlir::ModuleOp> module =
@@ -24,6 +25,7 @@ int main(int argc, char **argv) {
     if (mlir::failed(mlir_mr::lowerToLLVM(*module, &setup.mlirContext)))
         return 1;
 
+    // TODO: add flag depending on the tool?
     std::string outPath =
         mlir_mr::translateAndWriteToFile(*module, setup.llvmContext, "output.ll");
     if (outPath.empty())
