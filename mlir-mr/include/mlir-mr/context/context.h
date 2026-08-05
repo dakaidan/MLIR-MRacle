@@ -3,6 +3,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/PassManager.h"
 #include "llvm/IR/LLVMContext.h"
+#include <string>
 
 namespace mlir_mr {
 
@@ -11,7 +12,7 @@ struct MLIRSetup {
     llvm::LLVMContext llvmContext;
     mlir::PassManager pm;
 
-    MLIRSetup();
+    MLIRSetup(int seed = 42, const std::string &transforms = "");
 };
 
 } // namespace mlir_mr

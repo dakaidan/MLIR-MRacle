@@ -1,3 +1,5 @@
+#include "mlir-mr/passes/MetamorphicMemoryModelPass.h"
+
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -10,8 +12,11 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
 #include <algorithm>
 #include <random>
+#include <string>
 #include <utility>
 
 namespace mlir {
@@ -98,11 +103,25 @@ struct MetamorphicMemoryModelPass
 
         using Transform = bool (MetamorphicMemoryModelPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
 
-        // Register possible passes
-        SmallVector<Transform> transforms = {
-            &MetamorphicMemoryModelPass::tryApplyMultisetPermutation,
-            &MetamorphicMemoryModelPass::tryApplyLoadReordering,
+        static const llvm::StringMap<Transform> kTransformMap = {
+            {"multiset-permutation", &MetamorphicMemoryModelPass::tryApplyMultisetPermutation},
+            {"load-reordering", &MetamorphicMemoryModelPass::tryApplyLoadReordering},
+            {"insert-fence", &MetamorphicMemoryModelPass::tryInsertFenceRandom},
         };
+
+        SmallVector<Transform> transforms;
+        if (this->transforms.empty()) {
+            for (auto &kv : kTransformMap)
+                transforms.push_back(kv.second);
+        } else {
+            for (const auto &name : this->transforms) {
+                auto it = kTransformMap.find(name);
+                if (it != kTransformMap.end())
+                    transforms.push_back(it->second);
+            }
+            if (transforms.empty())
+                return;
+        }
 
         // shuffle the order of the passes to apply
         std::shuffle(transforms.begin(), transforms.end(), rng);
@@ -202,7 +221,7 @@ private:
         auto &run = eligibleRuns[dist(rng)];
 
         SmallVector<memref::LoadOp> shuffled = run;
-        
+
         // keep shuffling until the order actually differs from the original run
         do {
             std::shuffle(shuffled.begin(), shuffled.end(), rng);
@@ -222,13 +241,37 @@ private:
 
         return true;
     }
+
+    bool tryInsertFenceRandom(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        SmallVector<Operation *> allOps;
+        op.walk([&](Operation *op) {
+            allOps.push_back(op);
+        });
+
+        if (allOps.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, allOps.size() - 1);
+
+        rewriter.setInsertionPoint(allOps[dist(rng)]);
+        rewriter.create<omp::FlushOp>(op.getLoc(), ValueRange{});
+        return true;
+    }
 };
 
-std::unique_ptr<Pass> createMetamorphicMemoryModelPass() {
-    return std::make_unique<MetamorphicMemoryModelPass>();
+std::unique_ptr<Pass> createMetamorphicMemoryModelPass(int seed, const std::string &transforms) {
+    MetamorphicMemoryModelPassOptions options;
+    options.seed = seed;
+    if (!transforms.empty()) {
+        SmallVector<StringRef, 4> names;
+        StringRef(transforms).split(names, ',', -1, false);
+        for (auto name : names)
+            options.transforms.push_back(name.trim().str());
+    }
+    return std::make_unique<MetamorphicMemoryModelPass>(options);
 }
 
 } // namespace mlir
 
 #define GEN_PASS_REGISTRATION
-#include "MetamorphicMemoryModelPass.inc"#include <iterator>
+#include "MetamorphicMemoryModelPass.inc"
