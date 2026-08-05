@@ -2,6 +2,8 @@ module {
   func.func @main() -> i64 {
     %c0 = arith.constant 0 : index
     %counter = memref.alloc() : memref<1xi64>
+    %zero = arith.constant 0 : i64
+    memref.atomic_rmw assign %zero, %counter[%c0] : (i64, memref<1xi64>) -> i64
     %a = arith.constant 5 : i64
     %b = arith.constant 10 : i64
     %c = arith.constant 15 : i64
@@ -24,6 +26,7 @@ module {
       omp.terminator
     }
     %r = memref.load %counter[%c0] : memref<1xi64>
+    memref.dealloc %counter : memref<1xi64>
     return %r : i64
   }
 }

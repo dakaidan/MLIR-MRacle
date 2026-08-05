@@ -103,13 +103,17 @@ struct MetamorphicMemoryModelPass
 
         using Transform = bool (MetamorphicMemoryModelPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
 
+        // map of transform names to member function pointers
         static const llvm::StringMap<Transform> kTransformMap = {
             {"multiset-permutation", &MetamorphicMemoryModelPass::tryApplyMultisetPermutation},
             {"load-reordering", &MetamorphicMemoryModelPass::tryApplyLoadReordering},
             {"insert-fence", &MetamorphicMemoryModelPass::tryInsertFenceRandom},
         };
 
+        // pass option, from flag
         SmallVector<Transform> transforms;
+
+        // if empty use all transforms, otherwise use the ones specified in the flag
         if (this->transforms.empty()) {
             for (auto &kv : kTransformMap)
                 transforms.push_back(kv.second);
@@ -133,6 +137,8 @@ struct MetamorphicMemoryModelPass
     }
 
 private:
+
+    // TODO: generalise for more atomic operations?
     bool tryApplyMultisetPermutation(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
 
         // Groups of thread RMW ops keyed by (memref, AtomicRMWKind).
@@ -140,12 +146,14 @@ private:
             llvm::DenseMap<std::pair<Value, arith::AtomicRMWKind>,
                    SmallVector<memref::AtomicRMWOp>>;
 
+        // find all thread-atomic RMWs and group them by (memref, kind)
         RmwGroupMap groups;
         op.walk([&](memref::AtomicRMWOp atomic) {
             if (isThreadAtomic(atomic))
                 groups[{atomic.getMemref(), atomic.getKind()}].push_back(atomic);
         });
 
+        // if group size > 2 and the kind is commutative and associative, add to candidates
         SmallVector<std::pair<Value, arith::AtomicRMWKind>> candidates;
         for (const auto &kv : groups)
             if (kv.second.size() >= 2 && isCommutativeAssociative(kv.first.second))
@@ -154,19 +162,25 @@ private:
         if (candidates.empty())
             return false;
 
+        // randomly select a candidate group and shuffle the RMWs within that group
         std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
         SmallVector<memref::AtomicRMWOp> atomics = groups[candidates[dist(rng)]];
 
         SmallVector<Operation *> containers;
         containers.reserve(atomics.size());
+
+        // for each atomc, store the innermost omp.section or omp.parallel that contains it
         for (memref::AtomicRMWOp a : atomics)
-        containers.push_back(getThreadContainer(a));
+            containers.push_back(getThreadContainer(a));
 
-        std::shuffle(atomics.begin(), atomics.end(), rng);
+        // randomise the thread containers
+        std::uniform_int_distribution<size_t> containerDist(0, containers.size() - 1);
 
-        for (size_t i = 0; i < atomics.size(); ++i) {
-            Operation *anchor = containers[i]->getRegion(0).front().getTerminator();
-            rewriter.moveOpBefore(atomics[i], anchor);
+        // for each RMW, move it to the end of a randomly chosen thread container
+        for (memref::AtomicRMWOp atomic : atomics) {
+            Operation *container = containers[containerDist(rng)];
+            Operation *anchor = container->getRegion(0).front().getTerminator();
+            rewriter.moveOpBefore(atomic, anchor);
         }
         return true;
     }
@@ -275,3 +289,5 @@ std::unique_ptr<Pass> createMetamorphicMemoryModelPass(int seed, const std::stri
 
 #define GEN_PASS_REGISTRATION
 #include "MetamorphicMemoryModelPass.inc"
+#include <map>
+#include <iterator>

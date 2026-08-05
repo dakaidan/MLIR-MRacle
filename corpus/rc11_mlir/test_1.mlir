@@ -8,7 +8,7 @@ module {
     %c2_i64 = arith.constant 2 : i64
 
     %x = memref.alloc() : memref<1xi64>
-    memref.store %c0_i64, %x[%c0] : memref<1xi64>
+    memref.atomic_rmw assign %c0_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
 
     omp.parallel {
       omp.sections {

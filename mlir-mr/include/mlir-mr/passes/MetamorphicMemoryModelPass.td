@@ -16,10 +16,10 @@ def MetamorphicMemoryModelPass : Pass<"MetamorphicMemoryModelPass", "::mlir::fun
     let options = [
       Option<"seed", "seed", "int", "42",
              "Seed for the RNG that picks which metamorphic relation to apply">,
-      ListOption<"transforms", "transforms", "std::string",
+      Option<"transforms", "transforms", "std::string", "\"\"",
              "Comma-separated list of transforms to select from: "
              "multiset-permutation, load-reordering, insert-fence. "
-             "Empty (default) uses all three.">
+             "Empty (default) uses all three."
     ];
 
     let dependentDialects = [

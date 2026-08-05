@@ -1,7 +1,7 @@
 // test_5: SC store buffering
 // forall ((x == 1 /\ y == 1) \/ (x == 1 /\ y == 2) \/ (x == 2 /\ y == 1))
 module {
-  func.func @main() -> i64 {
+  func.func @main() -> (i64, i64) {
     %c0 = arith.constant 0 : index
     %c0_i64 = arith.constant 0 : i64
     %c1_i64 = arith.constant 1 : i64
@@ -9,8 +9,8 @@ module {
 
     %y = memref.alloc() : memref<1xi64>
     %x = memref.alloc() : memref<1xi64>
-    memref.store %c0_i64, %y[%c0] : memref<1xi64>
-    memref.store %c0_i64, %x[%c0] : memref<1xi64>
+    memref.atomic_rmw assign %c0_i64, %y[%c0] : (i64, memref<1xi64>) -> i64
+    memref.atomic_rmw assign %c0_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
 
     omp.parallel {
       omp.sections {
@@ -33,9 +33,10 @@ module {
       omp.terminator
     }
 
-    %result = memref.load %x[%c0] : memref<1xi64>
+    %x_val = memref.load %x[%c0] : memref<1xi64>
+    %y_val = memref.load %y[%c0] : memref<1xi64>
     memref.dealloc %y : memref<1xi64>
     memref.dealloc %x : memref<1xi64>
-    return %result : i64
+    return %x_val, %y_val : i64, i64
   }
 }
