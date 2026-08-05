@@ -30,4 +30,5 @@ target_link_libraries(mlir_mr_passes PUBLIC
     MLIRMemRefDialect
     MLIRSCFDialect
     MLIRLLVMDialect
+    MLIROpenMPDialect
 )
