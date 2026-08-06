@@ -11,10 +11,9 @@
 
 namespace mlir_mr {
 
-MLIRSetup::MLIRSetup(int seed, const std::string &transforms)
+MLIRSetup::MLIRSetup(int seed, const std::string &transforms, bool debug)
     : pm(&mlirContext, mlir::ModuleOp::getOperationName()) {
-    pm.addNestedPass<mlir::func::FuncOp>(
-        ::mlir::createMetamorphicMemoryModelPass(seed, transforms));
+    pm.addPass(::mlir::createMetamorphicMemoryModelPass(seed, transforms, debug));
     mlir::registerBuiltinDialectTranslation(mlirContext);
     mlir::registerLLVMDialectTranslation(mlirContext);
 

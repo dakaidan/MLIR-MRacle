@@ -74,3 +74,4 @@ fuzzing/tools/
 llvm-project/build/
 llvm-project/**/build/
 llvm-project/install/
+.vscode/

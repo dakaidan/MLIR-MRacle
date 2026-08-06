@@ -12,7 +12,7 @@ struct MLIRSetup {
     llvm::LLVMContext llvmContext;
     mlir::PassManager pm;
 
-    MLIRSetup(int seed = 42, const std::string &transforms = "");
+    MLIRSetup(int seed = 42, const std::string &transforms = "", bool debug = false);
 };
 
 } // namespace mlir_mr
