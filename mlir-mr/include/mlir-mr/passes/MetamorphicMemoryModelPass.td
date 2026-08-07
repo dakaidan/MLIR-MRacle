@@ -17,7 +17,9 @@ def MetamorphicMemoryModelPass : Pass<"MetamorphicMemoryModelPass", "::mlir::Mod
       Option<"seed", "seed", "int", "42",
              "Seed for the RNG that picks which metamorphic relation to apply">,
       Option<"transform", "transform", "std::string", "",
-             "Only try this transform (empty = pick at random)">
+             "Comma-separated list of transforms to try (empty = pick at random)">,
+      Option<"maxApply", "apply", "int", "1",
+             "Limit on the number of successful transformations applied to a single function">
     ];
 
     let dependentDialects = [

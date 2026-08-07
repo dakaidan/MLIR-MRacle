@@ -13,7 +13,8 @@ struct PipelineOptions {
     int seed = -1;          // -1 = random per run, >=0 = fixed
     int runNumber = 0;
     int numRuns = 1;
-    std::string transform;
+    std::string transform;  // comma-separated list of transforms to try, empty = any
+    int maxApply = 1;       // the limit on the number of times a transformation can be applied to a single function, 1 is default
     bool printMLIR = false;
 };
 

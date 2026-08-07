@@ -8,6 +8,7 @@
 #include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include "mlir-mr/passes/MetamorphicMemoryModelPass.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace mlir_mr {
@@ -18,11 +19,15 @@ std::string RunInfo::toString() const {
     os << "run: " << runNumber << "\n";
     os << "seed: " << seed << "\n";
     os << "file: " << file << "\n";
-    os << "requested-transforms: "
-       << (requestedTransforms.empty() ? "all" : requestedTransforms) << "\n";
+    os << "requested-transforms: ";
+    if (requestedTransforms.empty())
+        os << "all\n";
+    else
+        os << llvm::join(requestedTransforms, ",") << "\n";
     if (transformApplied)
-        os << "applied-transformation: " << appliedTransform
-           << " in function '" << targetFunction << "'\n";
+        for (const auto &at : appliedTransforms)
+            os << "applied-transformation: " << at.name
+               << " in function '" << at.targetFunction << "'\n";
     else
         os << "applied-transformation: none\n";
     if (!error.empty())
@@ -35,16 +40,22 @@ llvm::json::Object RunInfo::toJson(bool includeMLIR) const {
     obj["run"] = runNumber;
     obj["seed"] = seed;
     obj["file"] = file;
-    obj["requested_transforms"] =
-        requestedTransforms.empty() ? "all" : requestedTransforms;
-    if (transformApplied) {
-        obj["applied_transform"] = appliedTransform;
-        obj["target_function"] = targetFunction;
-        obj["transform_applied"] = true;
-    } else {
-        obj["applied_transform"] = "none";
-        obj["transform_applied"] = false;
+    llvm::json::Array requested;
+    if (requestedTransforms.empty())
+        requested.push_back("all");
+    else
+        for (const auto &r : requestedTransforms)
+            requested.push_back(r);
+    obj["requested_transforms"] = std::move(requested);
+    llvm::json::Array applied;
+    for (const auto &at : appliedTransforms) {
+        llvm::json::Object entry;
+        entry["name"] = at.name;
+        entry["target_function"] = at.targetFunction;
+        applied.push_back(std::move(entry));
     }
+    obj["applied_transforms"] = std::move(applied);
+    obj["transform_applied"] = transformApplied;
     if (!error.empty())
         obj["error"] = error;
     if (includeMLIR)
@@ -52,11 +63,13 @@ llvm::json::Object RunInfo::toJson(bool includeMLIR) const {
     return obj;
 }
 
-MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform)
+MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform,
+                     int maxApply)
     : pm(&mlirContext, mlir::ModuleOp::getOperationName()) {
     runInfo.seed = seed;
     runInfo.runNumber = runNumber;
-    pm.addPass(::mlir::createMetamorphicMemoryModelPass(seed, &runInfo, transform));
+    pm.addPass(::mlir::createMetamorphicMemoryModelPass(seed, &runInfo, transform,
+                                                       maxApply));
     mlir::registerBuiltinDialectTranslation(mlirContext);
     mlir::registerLLVMDialectTranslation(mlirContext);
 

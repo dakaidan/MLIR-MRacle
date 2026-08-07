@@ -11,6 +11,6 @@ namespace mlir {
 class Pass;
 std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
     int seed = 42, mlir_mr::RunInfo *runInfo = nullptr,
-    std::string transform = "");
+    std::string transform = "", int maxApply = 1);
 
 }

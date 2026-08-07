@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <algorithm>
 
 int main(int argc, char **argv) {
     mlir_mr::PipelineOptions opts;
@@ -21,9 +22,13 @@ int main(int argc, char **argv) {
         } else if (std::strncmp(argv[i], "--runs=", 7) == 0) {
             opts.numRuns = std::strtol(argv[i] + 7, nullptr, 10);
         } else if (std::strncmp(argv[i], "--transform=", 12) == 0) {
-            opts.transform = argv[i] + 12;
+            if (!opts.transform.empty())
+                opts.transform += ",";
+            opts.transform += argv[i] + 12;
         } else if (std::strncmp(argv[i], "--multi=", 8) == 0) {
             opts.multiFolder = argv[i] + 8;
+        } else if (std::strncmp(argv[i], "--apply=", 8) == 0) {
+            opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
         } else {
             argv[newArgc++] = argv[i];
         }
@@ -32,13 +37,19 @@ int main(int argc, char **argv) {
 
     if (opts.multiFolder.empty() && argc < 2) {
         std::cerr << "usage: mlir-mr-opt [--print-mlir] [--seed=N] "
-                     "[--run=N] [--runs=N] [--transform=NAME] "
+                     "[--run=N] [--runs=N] "
+                     "[--transform=NAME[,NAME...]] "
                      "[--multi=FOLDER] <path-to-mlir-file>\n";
         return 1;
     }
 
     if (opts.printMLIR && opts.numRuns > 1) {
         std::cerr << "--print-mlir requires exactly one run (--runs=1 or omit)\n";
+        return 1;
+    }
+
+    if (opts.maxApply < 0) {
+        std::cerr << "--apply must be >= 0\n";
         return 1;
     }
 

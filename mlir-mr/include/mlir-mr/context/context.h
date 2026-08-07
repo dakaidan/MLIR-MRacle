@@ -5,16 +5,22 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/JSON.h"
 #include <string>
+#include <vector>
 
 namespace mlir_mr {
+
+// A single metamorphic transformation applied during a run.
+struct AppliedTransformation {
+    std::string name;
+    std::string targetFunction;
+};
 
 struct RunInfo {
     int runNumber = 0;
     int seed = 42;
     std::string file;
-    std::string requestedTransforms;
-    std::string appliedTransform;
-    std::string targetFunction;
+    std::vector<std::string> requestedTransforms;
+    std::vector<AppliedTransformation> appliedTransforms;
     bool transformApplied = false;
     std::string error;
     std::string mlirOutput;
@@ -29,7 +35,8 @@ struct MLIRSetup {
     mlir::PassManager pm;
     RunInfo runInfo;
 
-    MLIRSetup(int seed = 42, int runNumber = 0, std::string transform = "");
+    MLIRSetup(int seed = 42, int runNumber = 0, std::string transform = "",
+              int maxApply = 1);
 };
 
 } // namespace mlir_mr

@@ -144,26 +144,29 @@ struct MetamorphicMemoryModelPass
 
         std::string requested = transform.getValue();
 
-        // if a specific transform is requested, filter the list of transforms to only include that one
-        // else keep full list and pick at random
-        if (!requested.empty()) {
-            bool found = false;
-            llvm::erase_if(transforms, [&](const auto &t) {
-                if (t.first == requested) {
-                    found = true;
-                    return false;
-                }
-                return true;
-            });
-            if (!found) {
+        // parse the comma-separated requested list, empty means "pick at random"
+        SmallVector<llvm::StringRef, 4> requestedNames;
+        if (!requested.empty())
+            llvm::StringRef(requested).split(requestedNames, ',');
+
+        // validate every requested transform name before filtering
+        for (llvm::StringRef name : requestedNames)
+            if (!kTransformMap.contains(name)) {
                 if (runInfo)
-                    runInfo->error = "unknown transform '" + requested + "'";
+                    runInfo->error = "unknown transform '" + name.str() + "'";
                 signalPassFailure();
                 return;
             }
-        }
+
+        // if specific transforms are requested, filter the list to only those
+        // else keep the full list and pick at random
+        if (!requestedNames.empty())
+            llvm::erase_if(transforms, [&](const auto &t) {
+                return !llvm::is_contained(requestedNames, t.first);
+            });
         if (runInfo)
-            runInfo->requestedTransforms = requested;
+            for (llvm::StringRef name : requestedNames)
+                runInfo->requestedTransforms.push_back(name.str());
 
         // collect all functions in the module
         SmallVector<func::FuncOp> funcs;
@@ -175,19 +178,28 @@ struct MetamorphicMemoryModelPass
         std::uniform_int_distribution<size_t> dist(0, funcs.size() - 1);
         func::FuncOp target = funcs[dist(rng)];
 
-        // shuffle the order of the passes to apply
-        std::shuffle(transforms.begin(), transforms.end(), rng);
+        int transformCounter = 0;
 
-        // keep applying passes until one succeeds
-        for (auto &t : transforms)
-            if ((this->*t.second)(target, rewriter, rng)) {
-                if (runInfo) {
-                    runInfo->appliedTransform = t.first;
-                    runInfo->targetFunction = target.getName().str();
-                    runInfo->transformApplied = true;
+        // keep applying random transformations until max applications is reached
+        while (transformCounter < maxApply) {
+            std::shuffle(transforms.begin(), transforms.end(), rng);
+
+            bool applied = false;
+            for (auto &t : transforms)
+                if ((this->*t.second)(target, rewriter, rng)) {
+                    transformCounter++;
+                    if (runInfo) {
+                        runInfo->appliedTransforms.push_back(
+                            {t.first, target.getName().str()});
+                        runInfo->transformApplied = true;
+                    }
+                    applied = true;
+                    break;
                 }
-                return;
-            }
+
+            if (!applied)
+                break;
+        }
     }
 
 private:
@@ -497,13 +509,17 @@ private:
 
         return true;
     }
+
+    bool try
 };
 
 std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
-    int seed, mlir_mr::RunInfo *runInfo, std::string transform) {
+    int seed, mlir_mr::RunInfo *runInfo, std::string transform,
+    int maxApply) {
     MetamorphicMemoryModelPassOptions options;
     options.seed = seed;
     options.transform = transform;
+    options.maxApply = maxApply;
     auto pass = std::make_unique<MetamorphicMemoryModelPass>(options);
     pass->runInfo = runInfo;
     return pass;
