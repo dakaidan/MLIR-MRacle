@@ -1,5 +1,12 @@
+#pragma once
+
 #include "llvm/IR/Module.h"
 
 #include <memory>
 
-int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule);
+namespace mlir_mr {
+struct RunInfo;
+}
+
+int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
+                             mlir_mr::RunInfo *runInfo = nullptr);

@@ -1,69 +1,60 @@
-#include "mlir-mr/context/context.h"
-#include "mlir-mr/backend/lowering/lowering.h"
-#include "mlir-mr/io/io.h"
+#include "mlir-mr/core/api.h"
 
-#include "mlir/IR/OwningOpRef.h"
-#include "mlir/Parser/Parser.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cstdlib>   // for strtol
-#include <cstring>   // for strcmp
-#include <string>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
 
 int main(int argc, char **argv) {
+    mlir_mr::PipelineOptions opts;
 
-    // parse control flags and strip them from argv
-    bool printMLIR = false;
-    bool debug = false;
-    int seed = 42;
-    std::string transforms;
     int newArgc = 0;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--print-mlir") == 0) {
-            printMLIR = true;
-        } else if (std::strcmp(argv[i], "--debug") == 0) {
-            debug = true;
+            opts.printMLIR = true;
         } else if (std::strncmp(argv[i], "--seed=", 7) == 0) {
-            seed = std::strtol(argv[i] + 7, nullptr, 10);
-        } else if (std::strncmp(argv[i], "--transforms=", 13) == 0) {
-            transforms = argv[i] + 13;
+            opts.seed = std::strtol(argv[i] + 7, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--run=", 6) == 0) {
+            opts.runNumber = std::strtol(argv[i] + 6, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--runs=", 7) == 0) {
+            opts.numRuns = std::strtol(argv[i] + 7, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--transform=", 12) == 0) {
+            opts.transform = argv[i] + 12;
+        } else if (std::strncmp(argv[i], "--multi=", 8) == 0) {
+            opts.multiFolder = argv[i] + 8;
         } else {
             argv[newArgc++] = argv[i];
         }
     }
     argc = newArgc;
 
-    if (argc < 2) {
-        llvm::errs() << "Usage: mlir-mr-opt [--print-mlir] [--debug] [--seed=N] "
-                        "[--transforms=NAME[,NAME...]] <path-to-mlir-file>\n";
+    if (opts.multiFolder.empty() && argc < 2) {
+        std::cerr << "usage: mlir-mr-opt [--print-mlir] [--seed=N] "
+                     "[--run=N] [--runs=N] [--transform=NAME] "
+                     "[--multi=FOLDER] <path-to-mlir-file>\n";
         return 1;
     }
 
-    // Setup context
-    mlir_mr::MLIRSetup setup(seed, transforms, debug);
-
-    mlir::OwningOpRef<mlir::ModuleOp> module =
-        mlir::parseSourceFile<mlir::ModuleOp>(argv[1], &setup.mlirContext);
-    if (!module) {
-        llvm::errs() << "Parse error\n";
+    if (opts.printMLIR && opts.numRuns > 1) {
+        std::cerr << "--print-mlir requires exactly one run (--runs=1 or omit)\n";
         return 1;
     }
 
-    if (mlir::failed(setup.pm.run(*module)))
-        return 1;
+    if (!opts.multiFolder.empty())
+        opts.inputFile = "";
+    else
+        opts.inputFile = argv[1];
 
-    // Print MLIR if flagged
-    if (printMLIR)
-        module->print(llvm::outs());
+    mlir_mr::PipelineResult result = mlir_mr::runPipeline(opts);
 
-    if (mlir::failed(mlir_mr::lowerToLLVM(*module, &setup.mlirContext)))
-        return 1;
+    llvm::json::Array arr;
+    for (const auto &run : result.runs)
+        arr.push_back(run.toJson(opts.printMLIR));
 
-    std::string outPath =
-        mlir_mr::translateAndWriteToFile(*module, setup.llvmContext, "output.ll");
-    if (outPath.empty())
-        return 1;
-
-    llvm::outs() << "Wrote output to " << outPath << "\n";
+    // all outputs are JSON arrays of run info
+    // stdout for outputs, stderr for errors
+    llvm::outs() << llvm::json::Value(std::move(arr)) << "\n";
     return 0;
 }

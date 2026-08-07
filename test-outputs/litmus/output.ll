@@ -15,9 +15,9 @@ declare ptr @malloc(i64)
 define { i64, i64, i64, i64 } @main() {
   %structArg = alloca { ptr, ptr, ptr, ptr }, align 8
   %.reloaded = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
-  %.reloaded7 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
-  %.reloaded8 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
-  %.reloaded9 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
+  %.reloaded11 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
+  %.reloaded12 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
+  %.reloaded13 = alloca { ptr, ptr, i64, [1 x i64], [1 x i64] }, align 8
   %1 = call ptr @malloc(i64 8)
   %2 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } poison, ptr %1, 0
   %3 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %2, ptr %1, 1
@@ -34,68 +34,68 @@ define { i64, i64, i64, i64 } @main() {
   %14 = getelementptr i64, ptr %13, i64 0
   %15 = atomicrmw xchg ptr %14, i64 0 acq_rel, align 8
   %16 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, 1
-  %17 = getelementptr i64, ptr %16, i64 0
-  %18 = atomicrmw xchg ptr %17, i64 0 acq_rel, align 8
-  %19 = call ptr @malloc(i64 8)
-  %20 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } poison, ptr %19, 0
-  %21 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %20, ptr %19, 1
-  %22 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %21, i64 0, 2
-  %23 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %22, i64 1, 3, 0
-  %24 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %23, i64 1, 4, 0
-  %25 = call ptr @malloc(i64 8)
-  %26 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } poison, ptr %25, 0
-  %27 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %26, ptr %25, 1
-  %28 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %27, i64 0, 2
-  %29 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %28, i64 1, 3, 0
-  %30 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %29, i64 1, 4, 0
+  %17 = getelementptr inbounds nuw i64, ptr %16, i64 0
+  store i64 0, ptr %17, align 4
+  %18 = call ptr @malloc(i64 8)
+  %19 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } poison, ptr %18, 0
+  %20 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %19, ptr %18, 1
+  %21 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %20, i64 0, 2
+  %22 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %21, i64 1, 3, 0
+  %23 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %22, i64 1, 4, 0
+  %24 = call ptr @malloc(i64 8)
+  %25 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } poison, ptr %24, 0
+  %26 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %25, ptr %24, 1
+  %27 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %26, i64 0, 2
+  %28 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %27, i64 1, 3, 0
+  %29 = insertvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %28, i64 1, 4, 0
   br label %entry
 
 entry:                                            ; preds = %0
-  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, ptr %.reloaded, align 8
-  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, ptr %.reloaded7, align 8
-  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %30, ptr %.reloaded8, align 8
-  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %24, ptr %.reloaded9, align 8
+  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %29, ptr %.reloaded, align 8
+  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, ptr %.reloaded11, align 8
+  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, ptr %.reloaded12, align 8
+  store { ptr, ptr, i64, [1 x i64], [1 x i64] } %23, ptr %.reloaded13, align 8
   br label %omp_parallel
 
 omp_parallel:                                     ; preds = %entry
   %gep_.reloaded = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 0
   store ptr %.reloaded, ptr %gep_.reloaded, align 8
-  %gep_.reloaded7 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 1
-  store ptr %.reloaded7, ptr %gep_.reloaded7, align 8
-  %gep_.reloaded8 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 2
-  store ptr %.reloaded8, ptr %gep_.reloaded8, align 8
-  %gep_.reloaded9 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 3
-  store ptr %.reloaded9, ptr %gep_.reloaded9, align 8
+  %gep_.reloaded11 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 1
+  store ptr %.reloaded11, ptr %gep_.reloaded11, align 8
+  %gep_.reloaded12 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 2
+  store ptr %.reloaded12, ptr %gep_.reloaded12, align 8
+  %gep_.reloaded13 = getelementptr { ptr, ptr, ptr, ptr }, ptr %structArg, i32 0, i32 3
+  store ptr %.reloaded13, ptr %gep_.reloaded13, align 8
   call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr @1, i32 1, ptr @main..omp_par, ptr %structArg)
   br label %omp.par.exit
 
 omp.par.exit:                                     ; preds = %omp_parallel
-  %31 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %24, 1
-  %32 = getelementptr inbounds nuw i64, ptr %31, i64 0
-  %33 = load i64, ptr %32, align 4
-  %34 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %30, 1
-  %35 = getelementptr inbounds nuw i64, ptr %34, i64 0
-  %36 = load i64, ptr %35, align 4
-  %37 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, 1
-  %38 = getelementptr inbounds nuw i64, ptr %37, i64 0
-  %39 = load i64, ptr %38, align 4
-  %40 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, 1
-  %41 = getelementptr inbounds nuw i64, ptr %40, i64 0
-  %42 = load i64, ptr %41, align 4
-  %43 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, 0
-  call void @free(ptr %43)
-  %44 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, 0
-  call void @free(ptr %44)
-  %45 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %24, 0
-  call void @free(ptr %45)
-  %46 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %30, 0
-  call void @free(ptr %46)
+  %30 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %23, 1
+  %31 = getelementptr inbounds nuw i64, ptr %30, i64 0
+  %32 = load i64, ptr %31, align 4
+  %33 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %29, 1
+  %34 = getelementptr inbounds nuw i64, ptr %33, i64 0
+  %35 = load i64, ptr %34, align 4
+  %36 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, 1
+  %37 = getelementptr inbounds nuw i64, ptr %36, i64 0
+  %38 = load i64, ptr %37, align 4
   call void @__kmpc_flush(ptr @1)
-  %47 = insertvalue { i64, i64, i64, i64 } poison, i64 %33, 0
-  %48 = insertvalue { i64, i64, i64, i64 } %47, i64 %36, 1
-  %49 = insertvalue { i64, i64, i64, i64 } %48, i64 %39, 2
-  %50 = insertvalue { i64, i64, i64, i64 } %49, i64 %42, 3
-  ret { i64, i64, i64, i64 } %50
+  %39 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, 1
+  %40 = getelementptr inbounds nuw i64, ptr %39, i64 0
+  %41 = load i64, ptr %40, align 4
+  %42 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %6, 0
+  call void @free(ptr %42)
+  %43 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %12, 0
+  call void @free(ptr %43)
+  %44 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %23, 0
+  call void @free(ptr %44)
+  %45 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %29, 0
+  call void @free(ptr %45)
+  %46 = insertvalue { i64, i64, i64, i64 } poison, i64 %32, 0
+  %47 = insertvalue { i64, i64, i64, i64 } %46, i64 %35, 1
+  %48 = insertvalue { i64, i64, i64, i64 } %47, i64 %38, 2
+  %49 = insertvalue { i64, i64, i64, i64 } %48, i64 %41, 3
+  ret { i64, i64, i64, i64 } %49
 }
 
 ; Function Attrs: nounwind
@@ -103,12 +103,12 @@ define internal void @main..omp_par(ptr noalias %tid.addr, ptr noalias %zero.add
 omp.par.entry:
   %gep_.reloaded = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 0
   %loadgep_.reloaded = load ptr, ptr %gep_.reloaded, align 8, !align !1
-  %gep_.reloaded7 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 1
-  %loadgep_.reloaded7 = load ptr, ptr %gep_.reloaded7, align 8, !align !1
-  %gep_.reloaded8 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 2
-  %loadgep_.reloaded8 = load ptr, ptr %gep_.reloaded8, align 8, !align !1
-  %gep_.reloaded9 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 3
-  %loadgep_.reloaded9 = load ptr, ptr %gep_.reloaded9, align 8, !align !1
+  %gep_.reloaded11 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 1
+  %loadgep_.reloaded11 = load ptr, ptr %gep_.reloaded11, align 8, !align !1
+  %gep_.reloaded12 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 2
+  %loadgep_.reloaded12 = load ptr, ptr %gep_.reloaded12, align 8, !align !1
+  %gep_.reloaded13 = getelementptr { ptr, ptr, ptr, ptr }, ptr %0, i32 0, i32 3
+  %loadgep_.reloaded13 = load ptr, ptr %gep_.reloaded13, align 8, !align !1
   %p.lastiter = alloca i32, align 4
   %p.lowerbound = alloca i32, align 4
   %p.upperbound = alloca i32, align 4
@@ -118,9 +118,9 @@ omp.par.entry:
   store i32 %1, ptr %tid.addr.local, align 4
   %tid = load i32, ptr %tid.addr.local, align 4
   %2 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded, align 8
-  %3 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded7, align 8
-  %4 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded8, align 8
-  %5 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded9, align 8
+  %3 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded11, align 8
+  %4 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded12, align 8
+  %5 = load { ptr, ptr, i64, [1 x i64], [1 x i64] }, ptr %loadgep_.reloaded13, align 8
   br label %omp.region.after_alloca
 
 omp.region.after_alloca:                          ; preds = %omp.par.entry
@@ -154,8 +154,8 @@ omp_section_loop.cond:                            ; preds = %omp_section_loop.he
 
 omp_section_loop.exit:                            ; preds = %omp_section_loop.cond
   call void @__kmpc_for_static_fini(ptr @2, i32 %omp_global_thread_num)
-  %omp_global_thread_num6 = call i32 @__kmpc_global_thread_num(ptr @1)
-  call void @__kmpc_barrier(ptr @3, i32 %omp_global_thread_num6)
+  %omp_global_thread_num10 = call i32 @__kmpc_global_thread_num(ptr @1)
+  call void @__kmpc_barrier(ptr @3, i32 %omp_global_thread_num10)
   br label %omp_section_loop.after
 
 omp_section_loop.after:                           ; preds = %omp_section_loop.exit
@@ -176,52 +176,66 @@ omp_section_loop.body:                            ; preds = %omp_section_loop.co
   %12 = add i32 %11, 0
   switch i32 %12, label %omp_section_loop.body.sections.after [
     i32 0, label %omp_section_loop.body.case
-    i32 1, label %omp_section_loop.body.case3
+    i32 1, label %omp_section_loop.body.case5
   ]
 
-omp_section_loop.body.case3:                      ; preds = %omp_section_loop.body
-  br label %omp.section.region5
+omp_section_loop.body.case5:                      ; preds = %omp_section_loop.body
+  br label %omp.section.region7
 
-omp.section.region5:                              ; preds = %omp_section_loop.body.case3
+omp.section.region7:                              ; preds = %omp_section_loop.body.case5
   %13 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %2, 1
-  %14 = getelementptr i64, ptr %13, i64 0
-  %15 = atomicrmw xchg ptr %14, i64 1 acq_rel, align 8
-  %16 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %3, 1
-  %17 = getelementptr i64, ptr %16, i64 0
-  %18 = atomicrmw xchg ptr %17, i64 1 acq_rel, align 8
-  br label %omp.region.cont4
+  %14 = getelementptr inbounds nuw i64, ptr %13, i64 0
+  store i64 0, ptr %14, align 4
+  %15 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %3, 1
+  %16 = getelementptr inbounds nuw i64, ptr %15, i64 0
+  %17 = load i64, ptr %16, align 4
+  %18 = icmp eq i64 %17, 1
+  br i1 %18, label %omp.section.region8, label %omp.section.region9
 
-omp.region.cont4:                                 ; preds = %omp.section.region5
+omp.section.region9:                              ; preds = %omp.section.region8, %omp.section.region7
+  %19 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %2, 1
+  %20 = getelementptr inbounds nuw i64, ptr %19, i64 0
+  store i64 %17, ptr %20, align 4
+  br label %omp.region.cont6
+
+omp.region.cont6:                                 ; preds = %omp.section.region9
   br label %omp_section_loop.body.sections.after
+
+omp.section.region8:                              ; preds = %omp.section.region7
+  %21 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %4, 1
+  %22 = getelementptr i64, ptr %21, i64 0
+  %23 = atomicrmw xchg ptr %22, i64 1 acq_rel, align 8
+  br label %omp.section.region9
 
 omp_section_loop.body.case:                       ; preds = %omp_section_loop.body
   br label %omp.section.region
 
 omp.section.region:                               ; preds = %omp_section_loop.body.case
-  %19 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %4, 1
-  %20 = getelementptr inbounds nuw i64, ptr %19, i64 0
-  store i64 0, ptr %20, align 4
-  %21 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %5, 1
-  %22 = getelementptr inbounds nuw i64, ptr %21, i64 0
-  store i64 0, ptr %22, align 4
-  %23 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %3, 1
-  %24 = getelementptr i64, ptr %23, i64 0
-  %25 = atomicrmw add ptr %24, i64 0 acq_rel, align 8
-  %26 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %2, 1
+  %24 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %5, 1
+  %25 = getelementptr inbounds nuw i64, ptr %24, i64 0
+  store i64 0, ptr %25, align 4
+  %26 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %4, 1
   %27 = getelementptr i64, ptr %26, i64 0
   %28 = atomicrmw add ptr %27, i64 0 acq_rel, align 8
-  %29 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %5, 1
-  %30 = getelementptr inbounds nuw i64, ptr %29, i64 0
-  store i64 %25, ptr %30, align 4
-  %31 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %4, 1
-  %32 = getelementptr inbounds nuw i64, ptr %31, i64 0
-  store i64 %28, ptr %32, align 4
+  %29 = icmp eq i64 %28, 1
+  br i1 %29, label %omp.section.region3, label %omp.section.region4
+
+omp.section.region4:                              ; preds = %omp.section.region3, %omp.section.region
+  %30 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %5, 1
+  %31 = getelementptr inbounds nuw i64, ptr %30, i64 0
+  store i64 %28, ptr %31, align 4
   br label %omp.region.cont2
 
-omp.region.cont2:                                 ; preds = %omp.section.region
+omp.region.cont2:                                 ; preds = %omp.section.region4
   br label %omp_section_loop.body.sections.after
 
-omp_section_loop.body.sections.after:             ; preds = %omp.region.cont4, %omp.region.cont2, %omp_section_loop.body
+omp.section.region3:                              ; preds = %omp.section.region
+  %32 = extractvalue { ptr, ptr, i64, [1 x i64], [1 x i64] } %3, 1
+  %33 = getelementptr inbounds nuw i64, ptr %32, i64 0
+  store i64 1, ptr %33, align 4
+  br label %omp.section.region4
+
+omp_section_loop.body.sections.after:             ; preds = %omp.region.cont6, %omp.region.cont2, %omp_section_loop.body
   br label %omp_section_loop.inc
 
 omp_section_loop.inc:                             ; preds = %omp_section_loop.body.sections.after

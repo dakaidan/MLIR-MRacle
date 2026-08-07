@@ -2,6 +2,7 @@ add_subdirectory(backend)
 add_subdirectory(passes)
 add_subdirectory(context)
 add_subdirectory(io)
+add_subdirectory(core)
 
 add_library(mlir_mr INTERFACE)
 add_library(MLIRMR::mlir_mr ALIAS mlir_mr)
@@ -19,5 +20,6 @@ target_link_libraries(mlir_mr INTERFACE
     mlir_mr_passes
     mlir_mr_context
     mlir_mr_io
+    mlir_mr_core
 )
 

@@ -10,6 +10,7 @@ target_include_directories(mlir_mr_jit PUBLIC
 )
 
 target_link_libraries(mlir_mr_jit PUBLIC
+    mlir_mr_context
     llvm_mlir_headers
     LLVMCore
     LLVMSupport

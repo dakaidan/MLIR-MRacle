@@ -1,4 +1,5 @@
 #include "mlir-mr/passes/MetamorphicMemoryModelPass.h"
+#include "mlir-mr/context/context.h"
 
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -9,12 +10,12 @@
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <random>
@@ -70,17 +71,37 @@ static bool isThreadAtomic(memref::AtomicRMWOp atomic) {
     });
 }
 
+// True if the op executes inside a thread region (omp.section or omp.parallel).
+static bool isOpInThread(Operation *op) {
+    return op->getParentOfType<omp::SectionOp>() ||
+           op->getParentOfType<omp::ParallelOp>();
+}
+
+// True if the memref is private to the executing thread: its allocation op
+// sits inside an omp thread region and dominates the load (same region or an
+// enclosing region), so no other thread can reach it through SSA. Allocations
+// made in the enclosing function body (outside omp.parallel) are shared.
+static bool isThreadLocalMemref(Value memref, Operation *use) {
+    Operation *defOp = memref.getDefiningOp();
+    if (!defOp || !isa<memref::AllocaOp, memref::AllocOp>(defOp))
+        return false;
+    return isOpInThread(defOp) &&
+           defOp->getParentRegion()->isAncestor(use->getParentRegion());
+}
+
 // checks that the given run of loads is eligible for reordering, i.e.:
 //  - the run has at least two loads
-//  - none of the loads read from a memref that has been stored to
+//  - if inside a thread, only loads of thread-local memrefs are reorderable,
+//    since shared memrefs can race with other threads
 //  - no load in the run depends on the result of another load in the run
 static bool checkLoadRun(SmallVector<memref::LoadOp> &run,
-                         const llvm::DenseSet<Value> &storedMemrefs) {
+                         bool requireLocalMemrefs) {
     if (run.size() < 2)
         return false;
-    for (auto load : run)
-        if (storedMemrefs.contains(load.getMemref()))
-            return false;
+    if (requireLocalMemrefs)
+        for (auto load : run)
+            if (!isThreadLocalMemref(load.getMemref(), load))
+                return false;
     for (size_t i = 0; i < run.size(); ++i)
         for (size_t j = i + 1; j < run.size(); ++j)
             if (llvm::is_contained(run[j]->getOperands(), run[i].getResult()) ||
@@ -97,6 +118,8 @@ struct MetamorphicMemoryModelPass
     : public impl::MetamorphicMemoryModelPassBase<MetamorphicMemoryModelPass> {
 
     using impl::MetamorphicMemoryModelPassBase<MetamorphicMemoryModelPass>::MetamorphicMemoryModelPassBase;
+
+    mlir_mr::RunInfo *runInfo = nullptr;
 
     void runOnOperation() override {
         ModuleOp op = getOperation();
@@ -115,23 +138,32 @@ struct MetamorphicMemoryModelPass
             {"local-store-duplication", &MetamorphicMemoryModelPass::tryLocalStoreDuplication}
         };
 
-        // pass option, from flag
-        // keep the name alongside each transform so debug output can report which one was picked
         SmallVector<std::pair<std::string, Transform>, 4> transforms;
+        for (auto &kv : kTransformMap)
+            transforms.push_back({kv.getKey().str(), kv.second});
 
-        // if empty use all transforms, otherwise use the ones specified in the flag
-        if (this->transforms.empty()) {
-            for (auto &kv : kTransformMap)
-                transforms.push_back({kv.getKey().str(), kv.second});
-        } else {
-            for (const auto &name : this->transforms) {
-                auto it = kTransformMap.find(name);
-                if (it != kTransformMap.end())
-                    transforms.push_back({it->getKey().str(), it->second});
-            }
-            if (transforms.empty())
+        std::string requested = transform.getValue();
+
+        // if a specific transform is requested, filter the list of transforms to only include that one
+        // else keep full list and pick at random
+        if (!requested.empty()) {
+            bool found = false;
+            llvm::erase_if(transforms, [&](const auto &t) {
+                if (t.first == requested) {
+                    found = true;
+                    return false;
+                }
+                return true;
+            });
+            if (!found) {
+                if (runInfo)
+                    runInfo->error = "unknown transform '" + requested + "'";
+                signalPassFailure();
                 return;
+            }
         }
+        if (runInfo)
+            runInfo->requestedTransforms = requested;
 
         // collect all functions in the module
         SmallVector<func::FuncOp> funcs;
@@ -149,10 +181,11 @@ struct MetamorphicMemoryModelPass
         // keep applying passes until one succeeds
         for (auto &t : transforms)
             if ((this->*t.second)(target, rewriter, rng)) {
-                if (debug.getValue())
-                    llvm::errs() << "mlir-mr applied transformation '"
-                                 << t.first << "' in function '"
-                                 << target.getName() << "'\n";
+                if (runInfo) {
+                    runInfo->appliedTransform = t.first;
+                    runInfo->targetFunction = target.getName().str();
+                    runInfo->transformApplied = true;
+                }
                 return;
             }
     }
@@ -208,39 +241,62 @@ private:
     }
 
     // randomly reorder eligible runs of loads in the function
-    // - assumes loads are independent and do not depend on any stores to the same memref
-    // - 
+    // - runs inside threads only reorder loads of thread-local memrefs
+    // - runs in the single-threaded body may reorder loads of any memref
     bool tryLoadReordering(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
 
-        // firstly, collect all memrefs and that have been stored to in the function
-        // to avoid reordering loads that depend on a store to the same memref
-        // thus avoiding race conditions
-        llvm::DenseSet<Value> storedMemrefs;
-        op.walk([&](memref::StoreOp store) {
-            storedMemrefs.insert(store.getMemref());
-        });
-        op.walk([&](memref::AtomicRMWOp atomic) {
-            storedMemrefs.insert(atomic.getMemref());
-        });
+        ModuleOp module = op->getParentOfType<ModuleOp>();
+
+        if (!module)
+            return false;
+
+        llvm::DenseSet<func::FuncOp> threadReachable;
+
+        // We compute the set of functions reachable from thread regions in the module,
+        // as these functions would thread-reachable, execute parallelly and thus have restrictions on load reordering.
+        // Since its parallel too, only thread-local memrefs can be reordered, as shared memrefs can race
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            module.walk([&](func::CallOp call) {
+                func::FuncOp caller = call->getParentOfType<func::FuncOp>();
+                func::FuncOp callee = dyn_cast_or_null<func::FuncOp>(
+                    SymbolTable::lookupSymbolIn(module, call.getCallee()));
+                if (!caller || !callee)
+                    return;
+                if ((isOpInThread(call) || threadReachable.contains(caller)) &&
+                    threadReachable.insert(callee).second)
+                    changed = true;
+            });
+        }
+        bool funcInThread = threadReachable.contains(op);
 
         SmallVector<SmallVector<memref::LoadOp>> eligibleRuns;
 
         // function def: iterate over all regions in the function and collect eligible runs of loads
         std::function<void(Region &)> processRegion = [&](Region &region) {
             for (auto &block : region) {
-                SmallVector<memref::LoadOp> currentRun;
+                if (!block.empty()) {
+                    // the whole block shares one thread context
+                    bool inThread = funcInThread || isOpInThread(&block.front());
+                    SmallVector<memref::LoadOp> currentRun;
 
-                for (auto &op : block) {
-                    // if load, add
-                    if (auto load = dyn_cast<memref::LoadOp>(op)) {
-                        currentRun.push_back(load);
-                    } else {
-                        // else, no more loads in this run, so check if eligible
-                        if (checkLoadRun(currentRun, storedMemrefs))
-                            eligibleRuns.push_back({std::move(currentRun)});
-                        // reset for next run
-                        currentRun.clear();
+                    for (auto &op : block) {
+                        // if load, add
+                        if (auto load = dyn_cast<memref::LoadOp>(op)) {
+                            currentRun.push_back(load);
+                        } else {
+                            // else, no more loads in this run, so check if eligible
+                            if (checkLoadRun(currentRun, inThread))
+                                eligibleRuns.push_back({std::move(currentRun)});
+                            // reset for next run
+                            currentRun.clear();
+                        }
                     }
+
+                    // flush a trailing run at the end of the block
+                    if (checkLoadRun(currentRun, inThread))
+                        eligibleRuns.push_back({std::move(currentRun)});
                 }
 
                 // iterate over all regions in the block and process them recursively
@@ -287,6 +343,10 @@ private:
         SmallVector<Operation *> allOps;
         
         op.getBody().walk([&](Operation *innerOp) {
+            // omp.sections regions only allow omp.section ops and a terminator
+            // never place a flush as a direct child of one.
+            if (isa<omp::SectionsOp>(innerOp->getParentOp()))
+                return;
             allOps.push_back(innerOp);
         });
 
@@ -439,23 +499,19 @@ private:
     }
 };
 
-std::unique_ptr<Pass> createMetamorphicMemoryModelPass(int seed, const std::string &transforms, bool debug) {
+std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
+    int seed, mlir_mr::RunInfo *runInfo, std::string transform) {
     MetamorphicMemoryModelPassOptions options;
     options.seed = seed;
-    options.debug = debug;
-    if (!transforms.empty()) {
-        SmallVector<StringRef, 4> names;
-        StringRef(transforms).split(names, ',', -1, false);
-        for (auto name : names)
-            options.transforms.push_back(name.trim().str());
-    }
-    return std::make_unique<MetamorphicMemoryModelPass>(options);
+    options.transform = transform;
+    auto pass = std::make_unique<MetamorphicMemoryModelPass>(options);
+    pass->runInfo = runInfo;
+    return pass;
 }
 
 } // namespace mlir
 
 #define GEN_PASS_REGISTRATION
 #include "MetamorphicMemoryModelPass.inc"
-#include <map>
-#include <iterator>
+#include <list>
 #include <set>

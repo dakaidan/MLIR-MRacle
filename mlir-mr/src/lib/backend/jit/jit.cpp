@@ -1,15 +1,16 @@
 #include "mlir-mr/backend/jit/jit.h"
+#include "mlir-mr/context/context.h"
 
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/Support/TargetSelect.h"
-#include <llvm/IR/Constants.h>
 #include "llvm/ExecutionEngine/Orc/Core.h"
+#include <llvm/IR/Constants.h>
 
 #include <utility>
 
-int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
+int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
+                             mlir_mr::RunInfo *runInfo) {
 
     // Init the native target and its components
     llvm::InitializeNativeTarget();
@@ -20,8 +21,9 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
     // Set up the JIT compiler or error out if it fails
     auto jitOrErr = llvm::orc::LLJITBuilder().create();
     if (!jitOrErr) {
-        llvm::errs() << "Failed to create JIT: "
-                    << llvm::toString(jitOrErr.takeError()) << "\n";
+        if (runInfo)
+            runInfo->error = "failed to create JIT: " +
+                             llvm::toString(jitOrErr.takeError());
         return 1;
     }
 
@@ -32,14 +34,16 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule) {
     if (auto err = jit->addIRModule(
             llvm::orc::ThreadSafeModule(std::move(llvmModule),
                                          std::make_unique<llvm::LLVMContext>()))) {
-        llvm::errs() << "Failed to add module\n";
+        if (runInfo)
+            runInfo->error = "failed to add module: " + llvm::toString(std::move(err));
         return 1;
     }
     
     // Look up the "main" function
     auto sym = jit->lookup("main");
     if (!sym) {
-        llvm::errs() << "main not found\n";
+        if (runInfo)
+            runInfo->error = "main not found";
         return 1;
     }
 

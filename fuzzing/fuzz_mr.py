@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
-import random
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -32,7 +32,7 @@ def find_binary():
 def build_binary():
     cmake = shutil.which("cmake")
     if not cmake:
-        sys.exit("cmake not found in PATH; cannot build mlir_mr_opt")
+        sys.exit("cmake not found in PATH")
     if not (BUILD_DIR / "CMakeCache.txt").exists():
         subprocess.run(
             [cmake, "-G", "Ninja", "-S", str(PROJECT_ROOT), "-B", str(BUILD_DIR)],
@@ -44,114 +44,113 @@ def build_binary():
     )
     binary = find_binary()
     if not binary:
-        sys.exit(f"build succeeded but {BINARY_NAME} was not found under {BUILD_DIR}")
+        sys.exit(f"build succeeded but {BINARY_NAME} not found")
     return binary
-
-
-def collect_mlir_files(folder: Path):
-    """Return list of .mlir files in the given folder (non-recursive)."""
-    if not folder.is_dir():
-        sys.exit(f"folder not found or not a directory: {folder}")
-    files = [f for f in folder.iterdir() if f.is_file() and f.suffix == ".mlir"]
-    if not files:
-        sys.exit(f"no .mlir files found in {folder}")
-    return files
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the mlir-mr-opt metamorphic pass pipeline on a single .mlir file or a corpus folder."
+        description="Run the mlir-mr-opt metamorphic pass pipeline."
     )
     parser.add_argument(
-        "input",
-        nargs="?",
-        help="path to a single .mlir input file (ignored if --folder is used)",
+        "file", nargs="?", help="path to a single .mlir file"
     )
     parser.add_argument(
-        "--folder",
-        help="path to a folder of .mlir files; one is selected at random for each run",
+        "--multi", metavar="FOLDER",
+        help="folder of .mlir files; random one selected per run"
     )
-    parser.add_argument(
-        "--transforms", default="load-reordering,insert-fence"
-    )
-    parser.add_argument("--runs", type=int, default=1, help="number of runs to perform")
+    parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--print-mlir", action="store_true")
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--binary", help="override path to mlir_mr_opt")
+    parser.add_argument("--seed", type=int, help="fixed seed for all runs")
+    parser.add_argument("--transform", help="specific transformation to apply")
     parser.add_argument(
-        "--binary", help="path to the mlir_mr_opt binary (overrides lookup)"
-    )
-    parser.add_argument(
-        "--once",
-        nargs="?",
-        const=1,
-        type=int,
-        help="Run once with the given seed (default seed 1)",
-    )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Prints all output from the binary"
+        "--output-dir", help="write MLIR output to directory"
     )
 
     args = parser.parse_args()
 
-    if args.folder and args.input:
-        sys.exit("Cannot specify both --folder and a positional input file.")
-    if not args.folder and not args.input:
-        sys.exit("You must provide either an input file or --folder.")
+    if args.file and args.multi:
+        sys.exit("Cannot specify both FILE and --multi.")
+    if not args.file and not args.multi:
+        sys.exit("Must provide either FILE or --multi FOLDER.")
+    if args.output_dir and args.multi:
+        sys.exit("Cannot use --output-dir with --multi.")
+    if args.print_mlir and args.runs > 1:
+        sys.exit("--print-mlir requires exactly one run.")
 
-    if args.folder:
-        folder_path = Path(args.folder)
-        mlir_files = collect_mlir_files(folder_path)
-
-        # function def: return a random file from the corpus each time called
-        def get_input():
-            return random.choice(mlir_files)
-    else:
-        single_file = Path(args.input)
-        if not single_file.is_file():
-            sys.exit(f"input file not found: {args.input}")
-        def get_input():
-            return single_file
-
-    # Binary setup
     binary = Path(args.binary) if args.binary else find_binary()
     if not binary:
-        print(f"{BINARY_NAME} not found; building it...", file=sys.stderr)
+        print(f"{BINARY_NAME} not found; building...", file=sys.stderr)
         binary = build_binary()
 
-    runs = args.runs if args.once is None else 1
+    cmd = [str(binary)]
+    if args.print_mlir:
+        cmd.append("--print-mlir")
+    if args.seed is not None:
+        cmd.append(f"--seed={args.seed}")
+    if args.transform:
+        cmd.append(f"--transform={args.transform}")
+    cmd.append(f"--runs={args.runs}")
+    if args.multi:
+        cmd.append(f"--multi={args.multi}")
+    if args.file:
+        cmd.append(args.file)
 
-    for i in range(runs):
-        # Get the input file either from the folder or the single file
-        input_file = get_input()
-        seed = random.randint(0, 2**32 - 1) if args.once is None else args.once
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
-        cmd = [
-            str(binary),
-            f"--seed={seed}",
-            f"--transforms={args.transforms}",
-        ]
-        if args.print_mlir:
-            cmd.append("--print-mlir")
-        if args.debug:
-            cmd.append("--debug")
-        cmd.append(str(input_file))
+    # just print non run-info errors (ones that i cant catch)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    runs = []
+    raw = result.stdout
+    start = raw.find("[")
+    end = raw.rfind("]")
 
-        if result.returncode != 0:
-            print(
-                f"[CRASH] Run {i+1}, seed {seed}, file {input_file.name}, exit code {result.returncode}"
-            )
-            if result.stderr:
-                print(result.stderr, file=sys.stderr)
-            if args.verbose and result.stdout:
-                print(result.stdout)
+    # parse the JSON array of run info from stdout
+    if start != -1 and end != -1 and end > start:
+        try:
+            runs = json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            sys.stderr.write("failed to parse JSON from stdout\n")
+            sys.stderr.write(raw)
+            sys.exit(1)
+    elif raw.strip():
+        sys.stderr.write("no JSON array found in stdout\n")
+        sys.stderr.write(raw)
+        sys.exit(1)
 
-        elif args.verbose:
-            if result.stdout:
-                print(result.stdout)
-            if result.stderr:
-                print(result.stderr, file=sys.stderr)
+    # print run info
+    for run in runs:
+        is_error = run.get("error", "") != ""
+        if args.verbose or is_error:
+            status = "[FAIL]" if is_error else "[OK]"
+            xform = run.get("applied_transform", "none")
+            print(f"{status} run {run['run']}, seed {run['seed']}, "
+                  f"file {run['file']}, transform: {xform}")
+            if is_error:
+                print(f"       error: {run['error']}")
+
+    # if singular run and --print-mlir, print the MLIR output to stdout
+    if args.print_mlir and runs:
+        mlir = runs[0].get("mlir_output", "")
+        if mlir:
+            sys.stdout.write(mlir)
+
+    # if singular run and --output-dir, write the MLIR output to a file in the specified directory
+    if args.output_dir and runs:
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for run in runs:
+            mlir = run.get("mlir_output", "")
+            if mlir:
+                stem = Path(run["file"]).stem
+                out_file = (
+                    out_dir / f"{stem}_run{run['run']}_seed{run['seed']}.mlir"
+                )
+                out_file.write_text(mlir)
 
 
 if __name__ == "__main__":
