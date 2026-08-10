@@ -17,6 +17,7 @@ struct PipelineOptions {
     int maxApply = 1;       // the limit on the number of times a transformation can be applied to a single function, 1 is default
     bool printMLIR = false;
     bool log = false;       // also write artifacts for successful runs
+    bool verbose = false;   // include full outcome sets in warn/fail details
 };
 
 struct PipelineResult {

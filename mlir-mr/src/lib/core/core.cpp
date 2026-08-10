@@ -2,18 +2,18 @@
 
 #include "mlir-mr/backend/jit/jit.h"
 #include "mlir-mr/backend/lowering/lowering.h"
+#include "mlir-mr/io/io.h"
 
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -21,17 +21,8 @@
 
 namespace mlir_mr {
 
-struct CompareResult {
-    bool ok = true;
-    bool warn = false;
-    std::string message;
-};
-
 // per-campaign log subfolder, created lazily on first logged run
 static std::string gCampaignDir;
-
-// raw outcome frequencies recorded from executing a module
-using OutcomeCounts = std::map<int32_t, int>;
 
 // number of executions per module per comparison
 constexpr int kRuns = 2000;
@@ -41,82 +32,119 @@ constexpr int kRuns = 2000;
 // a warning. tweak to tighten/loosen the outlier filter.
 constexpr double kNovelOutcomeFrequency = 0.05;
 
-// Execution: compiles the module once and records the outcome frequencies
-// over numRuns executions. Returns empty counts and sets *error on failure.
+// Execution: compiles the module once and records the outcome frequencies of
+// every output position over numRuns executions. Returns empty counts and
+// sets *error on failure.
 static OutcomeCounts ExecuteModule(llvm::Module &module, int numRuns,
                                    std::string *error) {
     OutcomeCounts counts;
     auto fn = compileLLVMModuleToFunction(llvm::CloneModule(module), error);
     if (!fn)
         return counts;
-    for (int i = 0; i < numRuns; ++i)
-        ++counts[fn()];
+    for (int i = 0; i < numRuns; ++i) {
+        auto results = fn();
+        if (counts.size() < results.size())
+            counts.resize(results.size());
+        for (size_t r = 0; r < results.size(); ++r)
+            ++counts[r][results[r]];
+    }
     return counts;
 }
 
 // Comparison: a pure function over two outcome sets sampled in this
-// invocation with the same number of runs. A novel outcome in the transformed
-// module that appears often enough to rule out sampling noise is a hard
-// failure; sparse novel outcomes and vanished outcomes are warnings for later
-// triage by the model checker.
+// invocation with the same number of runs. Outputs are compared position by
+// position: output i of the original is matched against output i of the
+// transformed module, never against a different output. A novel outcome in
+// the transformed module that appears often enough to rule out sampling noise
+// is a hard failure; sparse novel outcomes and vanished outcomes are warnings
+// for later triage by the model checker.
 static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
                                      const OutcomeCounts &transformedCounts,
-                                     int numRuns) {
-    std::string warnings;
-    auto addWarning = [&](const std::string &w) {
-        if (!warnings.empty())
-            warnings += "; ";
-        warnings += w;
-    };
-
-    bool anyOverlap = false;
-    bool anyNovel = false;
-    for (auto &[val, _] : transformedCounts)
-        if (originalCounts.count(val) > 0)
-            anyOverlap = true;
-        else
-            anyNovel = true;
-
-    // no shared outcome at all: the transformed module is producing
-    // fundamentally different results, not explainable by sampling noise
-    if (anyNovel && !anyOverlap)
+                                     int numRuns, bool verbose) {
+    if (originalCounts.size() != transformedCounts.size())
         return {false, false,
-                "FAIL: outcome sets are completely disjoint over " +
-                    std::to_string(numRuns) + " runs"};
+                "result arity mismatch: original produces " +
+                    std::to_string(originalCounts.size()) +
+                    " outputs, transformed produces " +
+                    std::to_string(transformedCounts.size())};
 
-    // novel outcome frequent enough to be a genuine behavioural change
-    for (auto &[val, c] : transformedCounts) {
-        if (originalCounts.count(val) > 0)
+    std::vector<VariableIssue> issues;
+    bool identical = true;
+    for (size_t i = 0; i < originalCounts.size(); ++i) {
+        const auto &orig = originalCounts[i];
+        const auto &transf = transformedCounts[i];
+        if (orig != transf)
+            identical = false;
+
+        std::string label = originalCounts.size() == 1
+                                ? "output"
+                                : "output " + std::to_string(i);
+
+        bool anyOverlap = false;
+        bool anyNovel = false;
+        for (auto &[val, _] : transf)
+            if (orig.count(val) > 0)
+                anyOverlap = true;
+            else
+                anyNovel = true;
+
+        VariableIssue issue;
+        issue.label = label;
+        issue.originalSet = formatOutcomeSet(orig);
+        issue.transformedSet = formatOutcomeSet(transf);
+
+        // no shared outcome at all: the transformed module is producing
+        // fundamentally different results, not explainable by sampling noise
+        if (anyNovel && !anyOverlap) {
+            issue.disjoint = true;
+            issue.hardFail = true;
+            issues.push_back(std::move(issue));
             continue;
-        if (c >= numRuns * kNovelOutcomeFrequency)
-            return {false, false,
-                    "FAIL: novel outcome " + std::to_string(val) + " (" +
-                        std::to_string(c) + "/" + std::to_string(numRuns) +
-                        " runs) exceeds " +
-                        std::to_string(static_cast<int>(
-                            kNovelOutcomeFrequency * 100)) +
-                        "% of runs"};
-        addWarning("novel outcome " + std::to_string(val) + " (" +
-                   std::to_string(c) + "/" + std::to_string(numRuns) +
-                   " runs) below failure threshold");
+        }
+
+        // novel outcome frequent enough to be a genuine behavioural change
+        for (auto &[val, c] : transf) {
+            if (orig.count(val) > 0)
+                continue;
+            std::string note =
+                "novel outcome " + std::to_string(val) + " (" +
+                std::to_string(c) + "/" + std::to_string(numRuns) +
+                " runs) " +
+                (c >= numRuns * kNovelOutcomeFrequency
+                     ? "exceeds " +
+                           std::to_string(static_cast<int>(
+                               kNovelOutcomeFrequency * 100)) +
+                           "% of runs"
+                     : "below failure threshold");
+            if (c >= numRuns * kNovelOutcomeFrequency)
+                issue.hardFail = true;
+            issue.notes.push_back(note);
+        }
+
+        // outcome produced by the original but absent from the transformed
+        // module
+        for (auto &[val, c] : orig)
+            if (transf.count(val) == 0)
+                issue.notes.push_back("outcome " + std::to_string(val) +
+                                      " disappeared (" + std::to_string(c) +
+                                      "/" + std::to_string(numRuns) +
+                                      " runs)");
+
+        if (!issue.notes.empty())
+            issues.push_back(std::move(issue));
     }
 
-    // outcome produced by the original but absent from the transformed module
-    for (auto &[val, c] : originalCounts)
-        if (transformedCounts.count(val) == 0)
-            addWarning("outcome " + std::to_string(val) + " disappeared (" +
-                       std::to_string(c) + "/" + std::to_string(numRuns) +
-                       " runs)");
+    if (issues.empty()) {
+        std::string msg =
+            identical
+                ? "identical outcome maps over " + std::to_string(numRuns) +
+                      " runs"
+                : "outcome sets changed over " + std::to_string(numRuns) +
+                      " runs";
+        return {true, false, msg};
+    }
 
-    std::string msg =
-        (originalCounts == transformedCounts)
-            ? "match: identical outcome maps over " + std::to_string(numRuns) +
-                  " runs"
-            : "match: overlapping outcome sets over " +
-                  std::to_string(numRuns) + " runs";
-    if (!warnings.empty())
-        msg += " [" + warnings + "]";
-    return {true, !warnings.empty(), msg};
+    return renderComparison(numRuns, verbose, issues);
 }
 
 // Lazily creates the per-campaign log folder and returns its path.
@@ -163,22 +191,6 @@ static void saveRunArtifacts(const RunInfo &info,
     writeIfNonEmpty("jit.ll", jitLLVM);
 }
 
-static std::string dumpMLIR(mlir::ModuleOp module) {
-    std::string buf;
-    llvm::raw_string_ostream os(buf);
-    module.print(os);
-    os.flush();
-    return buf;
-}
-
-static std::string dumpLLVM(llvm::Module &module) {
-    std::string buf;
-    llvm::raw_string_ostream os(buf);
-    module.print(os, nullptr);
-    os.flush();
-    return buf;
-}
-
 // helper function for multi mode, collects all .mlir files in the given folder
 static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
     std::vector<std::string> files;
@@ -194,7 +206,8 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
 // single run mode, returns a RunInfo struct with the results of the run
 static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
-                         int maxApply, bool printMLIR, bool log) {
+                         int maxApply, bool printMLIR, bool log,
+                         bool verbose) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     setup.runInfo.file = inputFile;
 
@@ -299,7 +312,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         return setup.runInfo;
     }
 
-    CompareResult cmp = CompareOutcomes(origCounts, transfCounts, kRuns);
+    CompareResult cmp =
+        CompareOutcomes(origCounts, transfCounts, kRuns, verbose);
 
     if (!cmp.ok)
         setup.runInfo.error = cmp.message;
@@ -361,7 +375,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
         // here, so stdout stays machine-parseable
         RunInfo info = runSingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
-                                 opts.printMLIR, opts.log);
+                                 opts.printMLIR, opts.log, opts.verbose);
 
         result.runs.push_back(std::move(info));
     }

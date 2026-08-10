@@ -3,13 +3,19 @@
 
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/Core.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include <cstdint>
 #include <mutex>
 #include <utility>
 #include <string>
+#include <vector>
 
 static void initNativeTargetOnce() {
     static std::once_flag flag;
@@ -40,8 +46,70 @@ static void addStateResetFunction(llvm::Module &module) {
     builder.CreateRetVoid();
 }
 
+// number of scalar results produced by the module's "main" function
+static unsigned getResultCount(llvm::Module &module) {
+    auto *mainFn = module.getFunction("main");
+    if (!mainFn || mainFn->isDeclaration())
+        return 0;
+    if (auto *st = llvm::dyn_cast<llvm::StructType>(mainFn->getReturnType()))
+        if (!st->isOpaque() && st->getNumElements() > 0)
+            return st->getNumElements();
+    return 1;
+}
+
+// Adds a "__mlir_mr_run" wrapper that calls "main" and stores every result
+// into the "__mlir_mr_results" global (a buffer of int64_t, one slot per
+// result, in declaration order). This avoids ABI-specific struct-return
+// handling on the C++ side.
+static void addResultCaptureFunction(llvm::Module &module) {
+    auto &ctx = module.getContext();
+    auto *mainFn = module.getFunction("main");
+    if (!mainFn || mainFn->isDeclaration())
+        return;
+
+    unsigned numResults = getResultCount(module);
+    if (numResults == 0)
+        return;
+
+    auto *i64Ty = llvm::Type::getInt64Ty(ctx);
+    auto *bufferTy = llvm::ArrayType::get(i64Ty, numResults);
+    // External linkage: the buffer is only written inside the module, so
+    // internal linkage would let the optimizer drop it as a dead global.
+    auto *buffer = new llvm::GlobalVariable(
+        module, bufferTy, false, llvm::GlobalValue::ExternalLinkage,
+        llvm::ConstantAggregateZero::get(bufferTy), "__mlir_mr_results");
+
+    auto *runFn = llvm::Function::Create(
+        llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), false),
+        llvm::GlobalValue::ExternalLinkage, "__mlir_mr_run", &module);
+
+    llvm::IRBuilder<> builder(ctx);
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", runFn);
+    builder.SetInsertPoint(entry);
+
+    llvm::Value *ret = builder.CreateCall(mainFn);
+    for (unsigned i = 0; i < numResults; ++i) {
+        llvm::Value *v = numResults == 1
+                             ? ret
+                             : builder.CreateExtractValue(ret, i);
+        if (v->getType()->isIntegerTy()) {
+            if (v->getType()->getIntegerBitWidth() != 64)
+                v = builder.CreateSExtOrTrunc(v, i64Ty);
+        } else if (v->getType()->isPointerTy()) {
+            v = builder.CreatePtrToInt(v, i64Ty);
+        } else {
+            continue; // non-integer scalar results are not captured
+        }
+        llvm::Value *slot = builder.CreateInBoundsGEP(
+            bufferTy, buffer,
+            {builder.getInt32(0), builder.getInt32(i)});
+        builder.CreateStore(v, slot);
+    }
+    builder.CreateRetVoid();
+}
+
 // For one-time compilation, and keeps the compiled code alive
-std::function<int32_t()> compileLLVMModuleToFunction(
+std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error) {
 
@@ -61,8 +129,11 @@ std::function<int32_t()> compileLLVMModuleToFunction(
     // as the returned callable is referenced.
     std::shared_ptr<llvm::orc::LLJIT> jit(jitOrErr->release());
 
-    if (module)
+    unsigned numResults = module ? getResultCount(*module) : 0;
+    if (module) {
         addStateResetFunction(*module);
+        addResultCaptureFunction(*module);
+    }
 
     if (auto err = jit->addIRModule(
             llvm::orc::ThreadSafeModule(std::move(module),
@@ -72,24 +143,34 @@ std::function<int32_t()> compileLLVMModuleToFunction(
         return nullptr;
     }
 
-    auto sym = jit->lookup("main");
-    if (!sym) {
+    auto runSym = jit->lookup("__mlir_mr_run");
+    if (!runSym) {
         if (error)
             *error = "main not found";
         return nullptr;
     }
-
-    auto *fn = llvm::jitTargetAddressToPointer<int32_t (*)()>(sym->getValue());
+    auto *runFn =
+        llvm::jitTargetAddressToPointer<void (*)()>(runSym->getValue());
 
     void (*resetFn)() = nullptr;
     if (auto resetSym = jit->lookup("__mlir_mr_reset_state"))
         resetFn =
             llvm::jitTargetAddressToPointer<void (*)()>(resetSym->getValue());
 
-    return [jit, fn, resetFn]() -> int32_t {
+    auto resultsSym = jit->lookup("__mlir_mr_results");
+    if (!resultsSym) {
+        if (error)
+            *error = "result buffer not found";
+        return nullptr;
+    }
+    auto *resultsBuf =
+        llvm::jitTargetAddressToPointer<int64_t *>(resultsSym->getValue());
+
+    return [jit, runFn, resetFn, resultsBuf, numResults]() -> std::vector<int64_t> {
         if (resetFn)
             resetFn();
-        return fn();
+        runFn();
+        return std::vector<int64_t>(resultsBuf, resultsBuf + numResults);
     };
 }
 
@@ -105,6 +186,7 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
     }
     if (runInfo)
         runInfo->error.clear();
-    return fn();
+    auto results = fn();
+    return results.empty() ? 0 : static_cast<int>(results[0]);
 }
 

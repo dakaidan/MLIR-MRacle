@@ -98,6 +98,8 @@ def main():
         cmd.append("--print-mlir")
     if args.log:
         cmd.append("--log")
+    if args.verbose:
+        cmd.append("--verbose")
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
     transforms = []

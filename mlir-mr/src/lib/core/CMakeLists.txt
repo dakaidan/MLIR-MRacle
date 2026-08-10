@@ -1,4 +1,4 @@
-add_library(mlir_mr_core STATIC api.cpp)
+add_library(mlir_mr_core STATIC core.cpp)
 add_library(MLIRMR::mlir_mr_core ALIAS mlir_mr_core)
 
 set_property(TARGET mlir_mr_core PROPERTY CXX_STANDARD 23)
@@ -10,6 +10,7 @@ target_include_directories(mlir_mr_core PUBLIC
 )
 
 target_link_libraries(mlir_mr_core PUBLIC
+    mlir_mr_io
     mlir_mr_context
     mlir_mr_lowering
     mlir_mr_jit

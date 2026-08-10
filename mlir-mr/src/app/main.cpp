@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
             opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
         } else if (std::strcmp(argv[i], "--log") == 0) {
             opts.log = true;
+        } else if (std::strcmp(argv[i], "--verbose") == 0) {
+            opts.verbose = true;
         } else {
             argv[newArgc++] = argv[i];
         }
