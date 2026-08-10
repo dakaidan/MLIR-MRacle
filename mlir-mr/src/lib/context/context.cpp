@@ -32,6 +32,8 @@ std::string RunInfo::toString() const {
         os << "applied-transformation: none\n";
     if (!error.empty())
         os << "error: " << error << "\n";
+    if (!warn.empty())
+        os << "warn: " << warn << "\n";
     return buf;
 }
 
@@ -58,6 +60,8 @@ llvm::json::Object RunInfo::toJson(bool includeMLIR) const {
     obj["transform_applied"] = transformApplied;
     if (!error.empty())
         obj["error"] = error;
+    if (!warn.empty())
+        obj["warn"] = warn;
     if (includeMLIR)
         obj["mlir_output"] = mlirOutput;
     return obj;

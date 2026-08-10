@@ -133,7 +133,7 @@ struct MetamorphicMemoryModelPass
             {"multiset-permutation", &MetamorphicMemoryModelPass::tryMultisetPermutation},
             {"load-reordering", &MetamorphicMemoryModelPass::tryLoadReordering},
             {"insert-fence", &MetamorphicMemoryModelPass::tryInsertFence},
-            {"insert-thread", &MetamorphicMemoryModelPass::tryInsertThread},
+            // {"insert-thread", &MetamorphicMemoryModelPass::tryInsertThread},
             {"insert-atomic-rmw", &MetamorphicMemoryModelPass::tryInsertAtomicRMWInThread},
             {"local-store-duplication", &MetamorphicMemoryModelPass::tryLocalStoreDuplication}
         };
@@ -372,46 +372,46 @@ private:
         return true;
     }
 
-    bool tryInsertThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-
-        // Walk to find an existing omp.sections op
-        SmallVector<omp::SectionsOp> sectionsOps;
-        op.walk([&](omp::SectionsOp s) {
-            sectionsOps.push_back(s);
-        });
-
-        if (sectionsOps.empty())
-            return false;
-        
-        std::uniform_int_distribution<size_t> dist(0, sectionsOps.size() - 1);
-        auto &section = sectionsOps[dist(rng)];
-
-        // if no omp.sections op found, return false and do not apply
-        if (!section)
-            return false;
-
-        Region &region = section.getRegion();
-        if (region.empty())
-            return false;
-
-        Block &sectionBlock = region.front();
-        if (sectionBlock.empty() || !sectionBlock.back().hasTrait<OpTrait::IsTerminator>())
-            return false;
-
-        // Insert a new section before the sections terminator.
-        Operation *terminator = sectionBlock.getTerminator();
-        rewriter.setInsertionPoint(terminator);
-
-        auto newSection = omp::SectionOp::create(rewriter, op.getLoc());
-
-        // Create a new block for the new section
-        Block *body = rewriter.createBlock(&newSection.getRegion());
-        for (Type ty : sectionBlock.getArgumentTypes())
-            body->addArgument(ty, op.getLoc());
-        omp::TerminatorOp::create(rewriter, op.getLoc());
-
-        return true;
-    }
+//    bool tryInsertThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+//
+//        // Walk to find an existing omp.sections op
+//        SmallVector<omp::SectionsOp> sectionsOps;
+//        op.walk([&](omp::SectionsOp s) {
+//            sectionsOps.push_back(s);
+//        });
+//
+//        if (sectionsOps.empty())
+//            return false;
+//        
+//        std::uniform_int_distribution<size_t> dist(0, sectionsOps.size() - 1);
+//        auto &section = sectionsOps[dist(rng)];
+//
+//        // if no omp.sections op found, return false and do not apply
+//        if (!section)
+//            return false;
+//
+//        Region &region = section.getRegion();
+//        if (region.empty())
+//            return false;
+//
+//        Block &sectionBlock = region.front();
+//        if (sectionBlock.empty() || !sectionBlock.back().hasTrait<OpTrait::IsTerminator>())
+//            return false;
+//
+//        // Insert a new section before the sections terminator.
+//        Operation *terminator = sectionBlock.getTerminator();
+//        rewriter.setInsertionPoint(terminator);
+//
+//        auto newSection = omp::SectionOp::create(rewriter, op.getLoc());
+//
+//        // Create a new block for the new section
+//        Block *body = rewriter.createBlock(&newSection.getRegion());
+//        for (Type ty : sectionBlock.getArgumentTypes())
+//            body->addArgument(ty, op.getLoc());
+//        omp::TerminatorOp::create(rewriter, op.getLoc());
+//
+//        return true;
+//    }
 
     bool tryInsertAtomicRMWInThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         SmallVector<omp::SectionOp> candidates;
@@ -509,8 +509,6 @@ private:
 
         return true;
     }
-
-    bool try
 };
 
 std::unique_ptr<Pass> createMetamorphicMemoryModelPass(

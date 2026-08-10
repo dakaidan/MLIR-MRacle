@@ -8,141 +8,175 @@
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/JSON.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
-#include <algorithm>
-#include <cmath>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <random>
-#include <set>
 #include <string>
 #include <vector>
-#include <unordered_map>
+#include <algorithm>
 
 namespace mlir_mr {
 
-// Result of comparing the two compiled modules; ok=false signals an error or a
-// behavioural mismatch, message carries the human-readable detail.
 struct CompareResult {
     bool ok = true;
+    bool warn = false;
     std::string message;
 };
 
-// Chi-squared statistic for two equal-sized groups over a shared,
-// compacted category index [0, numCategories).
-static double chiSquaredFromCounts(const std::vector<int> &countA,
-                                    const std::vector<int> &countB) {
-    double chi2 = 0.0;
-    for (size_t c = 0; c < countA.size(); ++c) {
-        double total = countA[c] + countB[c];
-        if (total == 0.0)
-            continue;
-        double expected = total / 2.0; // equal group sizes
-        double dA = countA[c] - expected;
-        double dB = countB[c] - expected;
-        chi2 += (dA * dA) / expected + (dB * dB) / expected;
-    }
-    return chi2;
+// per-campaign log subfolder, created lazily on first logged run
+static std::string gCampaignDir;
+
+// raw outcome frequencies recorded from executing a module
+using OutcomeCounts = std::map<int32_t, int>;
+
+// number of executions per module per comparison
+constexpr int kRuns = 2000;
+
+// a novel outcome (absent from the original's outcome set) that appears in at
+// least this fraction of transformed runs is a hard failure; anything rarer is
+// a warning. tweak to tighten/loosen the outlier filter.
+constexpr double kNovelOutcomeFrequency = 0.05;
+
+// Execution: compiles the module once and records the outcome frequencies
+// over numRuns executions. Returns empty counts and sets *error on failure.
+static OutcomeCounts ExecuteModule(llvm::Module &module, int numRuns,
+                                   std::string *error) {
+    OutcomeCounts counts;
+    auto fn = compileLLVMModuleToFunction(llvm::CloneModule(module), error);
+    if (!fn)
+        return counts;
+    for (int i = 0; i < numRuns; ++i)
+        ++counts[fn()];
+    return counts;
 }
 
-// Monte-Carlo permutation test
-static double permutationPValue(std::vector<int> combinedIdx, int numCategories,
-                                 size_t n, double observedChi2,
-                                 int numPermutations, std::mt19937 &rng) {
-    std::vector<int> countA(numCategories), countB(numCategories);
-    int atLeastAsExtreme = 0;
-    for (int p = 0; p < numPermutations; ++p) {
-        std::shuffle(combinedIdx.begin(), combinedIdx.end(), rng);
-        std::fill(countA.begin(), countA.end(), 0);
-        std::fill(countB.begin(), countB.end(), 0);
-        for (size_t i = 0; i < n; ++i)
-            ++countA[combinedIdx[i]];
-        for (size_t i = n; i < combinedIdx.size(); ++i)
-            ++countB[combinedIdx[i]];
-        double chi2 = chiSquaredFromCounts(countA, countB);
-        if (chi2 >= observedChi2 - 1e-9)
-            ++atLeastAsExtreme;
-    }
-    // +1 smoothing: standard for MC permutation p-values, avoids a hard 0.
-    return static_cast<double>(atLeastAsExtreme + 1) / (numPermutations + 1);
-}
-
-static CompareResult ExecuteAndCompareModules(llvm::Module *module,
-                                              llvm::Module *transformedModule) {
-    constexpr int kRuns = 300;
-    constexpr int kNumPermutations = 100000;
-    constexpr double kAlpha = 0.0001;
-
-    std::string compileError;
-
-    auto origFn = compileLLVMModuleToFunction(
-        llvm::CloneModule(*module), &compileError);
-    if (!origFn)
-        return {false, "JIT compile error (original): " + compileError};
-
-    auto transfFn = compileLLVMModuleToFunction(
-        llvm::CloneModule(*transformedModule), &compileError);
-    if (!transfFn)
-        return {false, "JIT compile error (transformed): " + compileError};
-
-    std::map<int32_t, int> originalCounts, transformedCounts;
-    std::vector<int32_t> combined;
-    combined.reserve(kRuns * 2);
-    for (int i = 0; i < kRuns; ++i) {
-        int32_t o = origFn();
-        int32_t t = transfFn();
-        ++originalCounts[o];
-        ++transformedCounts[t];
-        combined.push_back(o);
-        combined.push_back(t);
-    }
-
-    if (originalCounts == transformedCounts)
-        return {true, "match: identical outcome maps over " +
-                          std::to_string(kRuns) + " runs"};
-
-    // Permutation test for distribution drift (maps differ but may still
-    // be statistically equivalent)
-    std::unordered_map<int32_t, int> categoryIndex;
-    auto index = [&](int32_t v) -> int {
-        auto it = categoryIndex.find(v);
-        if (it != categoryIndex.end())
-            return it->second;
-        int id = static_cast<int>(categoryIndex.size());
-        categoryIndex.emplace(v, id);
-        return id;
+// Comparison: a pure function over two outcome sets sampled in this
+// invocation with the same number of runs. A novel outcome in the transformed
+// module that appears often enough to rule out sampling noise is a hard
+// failure; sparse novel outcomes and vanished outcomes are warnings for later
+// triage by the model checker.
+static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
+                                     const OutcomeCounts &transformedCounts,
+                                     int numRuns) {
+    std::string warnings;
+    auto addWarning = [&](const std::string &w) {
+        if (!warnings.empty())
+            warnings += "; ";
+        warnings += w;
     };
 
-    for (auto &[val, _] : originalCounts) index(val);
-    for (auto &[val, _] : transformedCounts) index(val);
-    int numCategories = static_cast<int>(categoryIndex.size());
+    bool anyOverlap = false;
+    bool anyNovel = false;
+    for (auto &[val, _] : transformedCounts)
+        if (originalCounts.count(val) > 0)
+            anyOverlap = true;
+        else
+            anyNovel = true;
 
-    std::vector<int> countA(numCategories), countB(numCategories);
-    for (auto &[val, c] : originalCounts) countA[index(val)] = c;
-    for (auto &[val, c] : transformedCounts) countB[index(val)] = c;
+    // no shared outcome at all: the transformed module is producing
+    // fundamentally different results, not explainable by sampling noise
+    if (anyNovel && !anyOverlap)
+        return {false, false,
+                "FAIL: outcome sets are completely disjoint over " +
+                    std::to_string(numRuns) + " runs"};
 
-    double observedChi2 = chiSquaredFromCounts(countA, countB);
+    // novel outcome frequent enough to be a genuine behavioural change
+    for (auto &[val, c] : transformedCounts) {
+        if (originalCounts.count(val) > 0)
+            continue;
+        if (c >= numRuns * kNovelOutcomeFrequency)
+            return {false, false,
+                    "FAIL: novel outcome " + std::to_string(val) + " (" +
+                        std::to_string(c) + "/" + std::to_string(numRuns) +
+                        " runs) exceeds " +
+                        std::to_string(static_cast<int>(
+                            kNovelOutcomeFrequency * 100)) +
+                        "% of runs"};
+        addWarning("novel outcome " + std::to_string(val) + " (" +
+                   std::to_string(c) + "/" + std::to_string(numRuns) +
+                   " runs) below failure threshold");
+    }
 
-    std::vector<int> combinedIdx;
-    combinedIdx.reserve(combined.size());
-    for (int32_t v : combined)
-        combinedIdx.push_back(index(v));
+    // outcome produced by the original but absent from the transformed module
+    for (auto &[val, c] : originalCounts)
+        if (transformedCounts.count(val) == 0)
+            addWarning("outcome " + std::to_string(val) + " disappeared (" +
+                       std::to_string(c) + "/" + std::to_string(numRuns) +
+                       " runs)");
 
-    std::mt19937 rng(std::random_device{}());
-    double pValue = permutationPValue(std::move(combinedIdx), numCategories,
-                                       kRuns, observedChi2, kNumPermutations, rng);
+    std::string msg =
+        (originalCounts == transformedCounts)
+            ? "match: identical outcome maps over " + std::to_string(numRuns) +
+                  " runs"
+            : "match: overlapping outcome sets over " +
+                  std::to_string(numRuns) + " runs";
+    if (!warnings.empty())
+        msg += " [" + warnings + "]";
+    return {true, !warnings.empty(), msg};
+}
 
-    if (pValue < kAlpha)
-        return {false, "WARN: distribution differs (chi2=" +
-                           std::to_string(observedChi2) + ", p=" +
-                           std::to_string(pValue) + " < " +
-                           std::to_string(kAlpha) + ")"};
+// Lazily creates the per-campaign log folder and returns its path.
+static const std::string &ensureCampaignDir() {
+    if (gCampaignDir.empty()) {
+        using namespace std::chrono;
+        auto millis = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()).count();
+        gCampaignDir =
+            (std::filesystem::path("logs") /
+             ("campaign_" + std::to_string(millis))).string();
+        std::error_code ec;
+        std::filesystem::create_directories(gCampaignDir, ec);
+    }
+    return gCampaignDir;
+}
 
-    return {true, "match: distributions equivalent over " +
-                      std::to_string(kRuns) + " runs (permutation p=" +
-                      std::to_string(pValue) + ")"};
+// Writes the artifacts of a run to logs/<campaign>/run<N>_seed<S>/.
+// Only files whose content is available are written; the folder is created
+// lazily, so a campaign with nothing logged leaves nothing behind.
+static void saveRunArtifacts(const RunInfo &info,
+                             const std::string &transformedMLIR,
+                             const std::string &loweredMLIR,
+                             const std::string &jitLLVM) {
+    if (transformedMLIR.empty() && loweredMLIR.empty() && jitLLVM.empty())
+        return;
+
+    std::filesystem::path dir =
+        std::filesystem::path(ensureCampaignDir()) /
+        ("run" + std::to_string(info.runNumber) + "_seed" +
+         std::to_string(info.seed));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    auto writeIfNonEmpty = [&](const std::string &name,
+                               const std::string &content) {
+        if (content.empty())
+            return;
+        std::ofstream os((dir / name).string());
+        os << content;
+    };
+    writeIfNonEmpty("transformed.mlir", transformedMLIR);
+    writeIfNonEmpty("lowered.mlir", loweredMLIR);
+    writeIfNonEmpty("jit.ll", jitLLVM);
+}
+
+static std::string dumpMLIR(mlir::ModuleOp module) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    module.print(os);
+    os.flush();
+    return buf;
+}
+
+static std::string dumpLLVM(llvm::Module &module) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    module.print(os, nullptr);
+    os.flush();
+    return buf;
 }
 
 // helper function for multi mode, collects all .mlir files in the given folder
@@ -160,9 +194,15 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
 // single run mode, returns a RunInfo struct with the results of the run
 static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
-                         int maxApply, bool printMLIR) {
+                         int maxApply, bool printMLIR, bool log) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     setup.runInfo.file = inputFile;
+
+    std::string transformedMLIRStr, loweredMLIRStr, jitLLVMStr;
+    auto saveArtifacts = [&]() {
+        saveRunArtifacts(setup.runInfo, transformedMLIRStr,
+                         loweredMLIRStr, jitLLVMStr);
+    };
 
     // set up a diagnostic handler to capture errors at various layers and store them in the RunInfo struct
     mlir::ScopedDiagnosticHandler diagHandler(
@@ -191,47 +231,84 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         return setup.runInfo;
     setup.runInfo.error.clear();
 
-    // if requested, print the MLIR module to a string and store it in the RunInfo struct
-    // this is not found on the multiple run mode, as it is only useful for debugging a single run
-    if (printMLIR) {
-        std::string buf;
-        llvm::raw_string_ostream os(buf);
-        moduleToTransform->print(os);
-        os.flush();
-        setup.runInfo.mlirOutput = buf;
-    }
+    // snapshot the transformed MLIR before lowering overwrites the module;
+    // it is also the output used by --print-mlir
+    transformedMLIRStr = dumpMLIR(*moduleToTransform);
+    if (printMLIR)
+        setup.runInfo.mlirOutput = transformedMLIRStr;
 
     // lower the source module to LLVM IR
     setup.runInfo.error = "lowering of source module to LLVM failed";
-    if (mlir::failed(mlir_mr::lowerToLLVM(*originalModule, &setup.mlirContext)))
+    if (mlir::failed(mlir_mr::lowerToLLVM(*originalModule, &setup.mlirContext))) {
+        saveArtifacts();
         return setup.runInfo;
+    }
     setup.runInfo.error.clear();
 
     setup.runInfo.error = "translation of source module to LLVM IR failed";
     std::unique_ptr<llvm::Module> originalModuleLLVM =
         mlir::translateModuleToLLVMIR(*originalModule, setup.llvmContext);
-    if (!originalModuleLLVM)
+    if (!originalModuleLLVM) {
+        saveArtifacts();
         return setup.runInfo;
+    }
     setup.runInfo.error.clear();
 
     // lower the transformed module to LLVM IR
     setup.runInfo.error = "lowering of transformed module to LLVM failed";
-    if (mlir::failed(mlir_mr::lowerToLLVM(*moduleToTransform, &setup.mlirContext)))
+    if (mlir::failed(mlir_mr::lowerToLLVM(*moduleToTransform, &setup.mlirContext))) {
+        saveArtifacts();
         return setup.runInfo;
+    }
     setup.runInfo.error.clear();
+
+    // snapshot the lowered MLIR (LLVM dialect only)
+    loweredMLIRStr = dumpMLIR(*moduleToTransform);
 
     setup.runInfo.error = "translation of transformed module to LLVM IR failed";
     std::unique_ptr<llvm::Module> moduleToTransformLLVM =
         mlir::translateModuleToLLVMIR(*moduleToTransform, setup.llvmContext);
-    if (!moduleToTransformLLVM)
+    if (!moduleToTransformLLVM) {
+        saveArtifacts();
         return setup.runInfo;
+    }
     setup.runInfo.error.clear();
 
-    // execute the two LLVM IR modules and compare the results, storing an error only if the comparison fails
-    CompareResult cmp = ExecuteAndCompareModules(originalModuleLLVM.get(),
-                                                 moduleToTransformLLVM.get());
+    // snapshot the JIT-ready LLVM IR
+    jitLLVMStr = dumpLLVM(*moduleToTransformLLVM);
+
+    // execute both modules the same number of times and compare their outcome
+    // sets directly; there is no cached baseline to poison later comparisons
+    std::string compileError;
+
+    OutcomeCounts origCounts =
+        ExecuteModule(*originalModuleLLVM, kRuns, &compileError);
+    if (origCounts.empty()) {
+        setup.runInfo.error =
+            "JIT compile error (original): " + compileError;
+        saveArtifacts();
+        return setup.runInfo;
+    }
+
+    OutcomeCounts transfCounts =
+        ExecuteModule(*moduleToTransformLLVM, kRuns, &compileError);
+    if (transfCounts.empty()) {
+        setup.runInfo.error =
+            "JIT compile error (transformed): " + compileError;
+        saveArtifacts();
+        return setup.runInfo;
+    }
+
+    CompareResult cmp = CompareOutcomes(origCounts, transfCounts, kRuns);
+
     if (!cmp.ok)
         setup.runInfo.error = cmp.message;
+    if (cmp.warn)
+        setup.runInfo.warn = cmp.message;
+
+    // failures are always logged; successful runs only with --log
+    if (!setup.runInfo.error.empty() || log)
+        saveArtifacts();
 
     return setup.runInfo;
 }
@@ -240,6 +317,10 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
 PipelineResult runPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);
+
+    // each pipeline invocation gets its own log folder; created lazily
+    // on the first logged run
+    gCampaignDir.clear();
 
     // if multi mode is requested, collect all .mlir files in the given folder
     // if none are found return a RunInfo with an error
@@ -275,21 +356,13 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
             // else we can assume the input file is valid, as it was checked in main.cpp
             inputFile = opts.inputFile;
 
-        // run single run and collect the RunInfo, if there is an error print it to stderr, otherwise add it to the result
+        // run single run and collect the RunInfo; errors and warnings are
+        // carried inside the RunInfo and surfaced by the caller, not printed
+        // here, so stdout stays machine-parseable
         RunInfo info = runSingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
-                                 opts.printMLIR);
+                                 opts.printMLIR, opts.log);
 
-        // if there is an error, print it to stderr with the run number, seed, and file name
-        if (!info.error.empty()) {
-            llvm::errs() << "[ERROR] run=" << info.runNumber
-                         << " seed=" << info.seed
-                         << " file=" << info.file
-                         << ": " << info.error << "\n";
-            llvm::errs().flush();
-        }
-
-        // otherwise add the RunInfo to the result
         result.runs.push_back(std::move(info));
     }
 

@@ -29,6 +29,8 @@ int main(int argc, char **argv) {
             opts.multiFolder = argv[i] + 8;
         } else if (std::strncmp(argv[i], "--apply=", 8) == 0) {
             opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
+        } else if (std::strcmp(argv[i], "--log") == 0) {
+            opts.log = true;
         } else {
             argv[newArgc++] = argv[i];
         }
@@ -36,10 +38,11 @@ int main(int argc, char **argv) {
     argc = newArgc;
 
     if (opts.multiFolder.empty() && argc < 2) {
-        std::cerr << "usage: mlir-mr-opt [--print-mlir] [--seed=N] "
+        std::cerr << "usage: mlir-mr-opt [--print-mlir] [--log] [--seed=N] "
                      "[--run=N] [--runs=N] "
                      "[--transform=NAME[,NAME...]] "
-                     "[--multi=FOLDER] <path-to-mlir-file>\n";
+                     "[--multi=FOLDER] "
+                     "<path-to-mlir-file>\n";
         return 1;
     }
 

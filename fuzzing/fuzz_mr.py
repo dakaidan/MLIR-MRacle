@@ -73,7 +73,8 @@ def main():
         help="maximum number of transformations to apply per run"
     )
     parser.add_argument(
-        "--output-dir", help="write MLIR output to directory"
+        "--log", action="store_true",
+        help="log the transformed MLIR, LLVM IR and executable to the logs folder"
     )
 
     args = parser.parse_args()
@@ -82,10 +83,8 @@ def main():
         sys.exit("Cannot specify both FILE and --multi.")
     if not args.file and not args.multi:
         sys.exit("Must provide either FILE or --multi FOLDER.")
-    if args.output_dir and args.multi:
-        sys.exit("Cannot use --output-dir with --multi.")
     if args.print_mlir and args.runs > 1:
-        sys.exit("--print-mlir requires exactly one run.")
+        sys.exit("--print-mlir option only available for a singular run.")
     if args.apply < 1:
         sys.exit("--apply must be at least 1.")
 
@@ -97,6 +96,8 @@ def main():
     cmd = [str(binary)]
     if args.print_mlir:
         cmd.append("--print-mlir")
+    if args.log:
+        cmd.append("--log")
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
     transforms = []
@@ -136,14 +137,22 @@ def main():
         sys.stderr.write(raw)
         sys.exit(1)
 
-    # collect run lines; error runs are deferred so they print together at the end
+    # collect run lines; error and warn runs are deferred so they print
+    # together at the end, regardless of verbosity
     summary = []
     errors = []
+    warns = []
     for run in runs:
         is_error = run.get("error", "") != ""
-        if not (args.verbose or is_error):
+        is_warn = run.get("warn", "") != ""
+        if not (args.verbose or is_error or is_warn):
             continue
-        status = "[FAIL]" if is_error else "[OK]"
+        if is_error:
+            status = "[FAIL]"
+        elif is_warn:
+            status = "[WARN]"
+        else:
+            status = "[OK]"
         applied = run.get("applied_transforms", [])
         xform = ", ".join(
             f"{t['name']}@{t.get('target_function', '?')}"
@@ -153,6 +162,13 @@ def main():
                f"file {run['file']}, transform(s): {xform}"
         if is_error:
             errors.append(f"{line}\n       error: {run['error']}")
+        elif is_warn:
+            # warn detail is raw C++ analysis text; only surface it in
+            # verbose mode so the default view stays python-level only
+            if args.verbose:
+                warns.append(f"{line}\n{run['warn']}")
+            else:
+                warns.append(line)
         else:
             summary.append(line)
 
@@ -165,26 +181,16 @@ def main():
         if mlir:
             sys.stdout.write(mlir)
 
-    # if singular run and --output-dir, write the MLIR output to a file in the specified directory
-    if args.output_dir and runs:
-        out_dir = Path(args.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for run in runs:
-            mlir = run.get("mlir_output", "")
-            if mlir:
-                stem = Path(run["file"]).stem
-                out_file = (
-                    out_dir / f"{stem}_run{run['run']}_seed{run['seed']}.mlir"
-                )
-                out_file.write_text(mlir)
-
-    # collect raw binary stderr and per-run failures into one block at the end
-    if errors or result.stderr.strip():
+    # collect raw binary stderr and per-run failures/warnings into one block
+    # at the end; warns are shown as plain status lines, under all run results
+    if errors or warns or result.stderr.strip():
         print("-" * 60)
         if result.stderr.strip():
             sys.stdout.write(result.stderr)
             if not result.stderr.endswith("\n"):
                 sys.stdout.write("\n")
+        for line in warns:
+            print(line)
         for line in errors:
             print(line)
 

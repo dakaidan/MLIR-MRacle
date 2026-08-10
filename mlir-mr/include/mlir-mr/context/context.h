@@ -23,6 +23,7 @@ struct RunInfo {
     std::vector<AppliedTransformation> appliedTransforms;
     bool transformApplied = false;
     std::string error;
+    std::string warn;
     std::string mlirOutput;
 
     std::string toString() const;
