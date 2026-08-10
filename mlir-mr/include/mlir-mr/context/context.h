@@ -3,18 +3,19 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/PassManager.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/Support/JSON.h"
 #include <string>
 #include <vector>
 
 namespace mlir_mr {
 
 // A single metamorphic transformation applied during a run.
+// Used for logging and reporting in RunInfo.
 struct AppliedTransformation {
     std::string name;
     std::string targetFunction;
 };
 
+// Main data object about a single run of the metamorphic testing pipeline.
 struct RunInfo {
     int runNumber = 0;
     int seed = 42;
@@ -25,9 +26,6 @@ struct RunInfo {
     std::string error;
     std::string warn;
     std::string mlirOutput;
-
-    std::string toString() const;
-    llvm::json::Object toJson(bool includeMLIR = false) const;
 };
 
 struct MLIRSetup {

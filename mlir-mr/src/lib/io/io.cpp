@@ -1,5 +1,6 @@
 #include "mlir-mr/io/io.h"
 
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace mlir_mr {
@@ -79,6 +80,60 @@ CompareResult renderComparison(int numRuns, bool verbose,
                       std::to_string(numRuns) + " runs ===\n" + warnBody
                 : "outcomes disappeared over " + std::to_string(numRuns) +
                       " runs [" + warnBody + "]"};
+}
+
+std::string formatRunInfo(const RunInfo &info) {
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    os << "run: " << info.runNumber << "\n";
+    os << "seed: " << info.seed << "\n";
+    os << "file: " << info.file << "\n";
+    os << "requested-transforms: ";
+    if (info.requestedTransforms.empty())
+        os << "all\n";
+    else
+        os << llvm::join(info.requestedTransforms, ",") << "\n";
+    if (info.transformApplied)
+        for (const auto &at : info.appliedTransforms)
+            os << "applied-transformation: " << at.name
+               << " in function '" << at.targetFunction << "'\n";
+    else
+        os << "applied-transformation: none\n";
+    if (!info.error.empty())
+        os << "error: " << info.error << "\n";
+    if (!info.warn.empty())
+        os << "warn: " << info.warn << "\n";
+    return buf;
+}
+
+llvm::json::Object runInfoToJson(const RunInfo &info, bool includeMLIR) {
+    llvm::json::Object obj;
+    obj["run"] = info.runNumber;
+    obj["seed"] = info.seed;
+    obj["file"] = info.file;
+    llvm::json::Array requested;
+    if (info.requestedTransforms.empty())
+        requested.push_back("all");
+    else
+        for (const auto &r : info.requestedTransforms)
+            requested.push_back(r);
+    obj["requested_transforms"] = std::move(requested);
+    llvm::json::Array applied;
+    for (const auto &at : info.appliedTransforms) {
+        llvm::json::Object entry;
+        entry["name"] = at.name;
+        entry["target_function"] = at.targetFunction;
+        applied.push_back(std::move(entry));
+    }
+    obj["applied_transforms"] = std::move(applied);
+    obj["transform_applied"] = info.transformApplied;
+    if (!info.error.empty())
+        obj["error"] = info.error;
+    if (!info.warn.empty())
+        obj["warn"] = info.warn;
+    if (includeMLIR)
+        obj["mlir_output"] = info.mlirOutput;
+    return obj;
 }
 
 } // namespace mlir_mr

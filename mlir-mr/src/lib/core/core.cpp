@@ -1,4 +1,4 @@
-#include "mlir-mr/core/api.h"
+#include "mlir-mr/core/core.h"
 
 #include "mlir-mr/backend/jit/jit.h"
 #include "mlir-mr/backend/lowering/lowering.h"
@@ -27,17 +27,15 @@ static std::string gCampaignDir;
 // number of executions per module per comparison
 constexpr int kRuns = 2000;
 
-// a novel outcome (absent from the original's outcome set) that appears in at
-// least this fraction of transformed runs is a hard failure; anything rarer is
-// a warning. tweak to tighten/loosen the outlier filter.
+// threshold for a novel outcome to be considered a genuine behavioural change
 constexpr double kNovelOutcomeFrequency = 0.05;
 
-// Execution: compiles the module once and records the outcome frequencies of
-// every output position over numRuns executions. Returns empty counts and
-// sets *error on failure.
+// JIT executes a module and returns the outcome counts for each individual output variable
 static OutcomeCounts ExecuteModule(llvm::Module &module, int numRuns,
                                    std::string *error) {
     OutcomeCounts counts;
+
+    // module is cloned to avoid any side effects from the JIT'd code affecting the original module
     auto fn = compileLLVMModuleToFunction(llvm::CloneModule(module), error);
     if (!fn)
         return counts;
@@ -51,16 +49,19 @@ static OutcomeCounts ExecuteModule(llvm::Module &module, int numRuns,
     return counts;
 }
 
-// Comparison: a pure function over two outcome sets sampled in this
-// invocation with the same number of runs. Outputs are compared position by
-// position: output i of the original is matched against output i of the
-// transformed module, never against a different output. A novel outcome in
-// the transformed module that appears often enough to rule out sampling noise
-// is a hard failure; sparse novel outcomes and vanished outcomes are warnings
-// for later triage by the model checker.
+// Compares the outcome counts of two modules and returns a summary of the comparison
+//
+// - If a novel outcome appears more than kNovelOutcomeFrequency -> hard fail
+// - If the outcome sets are disjoint -> hard fail
+// - If a novel outcome appears but below the threshold -> warn
+// - If an outcome disappears more than kNovelOutcomeFrequency -> hard fail
+// - If the outcome sets are identical -> ok
+//
 static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
                                      const OutcomeCounts &transformedCounts,
                                      int numRuns, bool verbose) {
+
+    // check that the two modules produce the same number of outputs                                    
     if (originalCounts.size() != transformedCounts.size())
         return {false, false,
                 "result arity mismatch: original produces " +
@@ -70,18 +71,23 @@ static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
 
     std::vector<VariableIssue> issues;
     bool identical = true;
+
     for (size_t i = 0; i < originalCounts.size(); ++i) {
         const auto &orig = originalCounts[i];
         const auto &transf = transformedCounts[i];
+
         if (orig != transf)
             identical = false;
 
+        // label the output variable for reporting purposes
         std::string label = originalCounts.size() == 1
                                 ? "output"
                                 : "output " + std::to_string(i);
 
         bool anyOverlap = false;
         bool anyNovel = false;
+
+        // check for any overlap or novel outcomes between the original and transformed outcome sets
         for (auto &[val, _] : transf)
             if (orig.count(val) > 0)
                 anyOverlap = true;
@@ -93,8 +99,7 @@ static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
         issue.originalSet = formatOutcomeSet(orig);
         issue.transformedSet = formatOutcomeSet(transf);
 
-        // no shared outcome at all: the transformed module is producing
-        // fundamentally different results, not explainable by sampling noise
+        // sets disjoint -> hard fail
         if (anyNovel && !anyOverlap) {
             issue.disjoint = true;
             issue.hardFail = true;
@@ -102,7 +107,7 @@ static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
             continue;
         }
 
-        // novel outcome frequent enough to be a genuine behavioural change
+        // novel outcome appears over the threshold -> hard fail, else warn
         for (auto &[val, c] : transf) {
             if (orig.count(val) > 0)
                 continue;
@@ -121,19 +126,23 @@ static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
             issue.notes.push_back(note);
         }
 
-        // outcome produced by the original but absent from the transformed
-        // module
-        for (auto &[val, c] : orig)
-            if (transf.count(val) == 0)
-                issue.notes.push_back("outcome " + std::to_string(val) +
-                                      " disappeared (" + std::to_string(c) +
-                                      "/" + std::to_string(numRuns) +
-                                      " runs)");
+        // absent outcome disappears over the threshold -> hard fail, else warn
+        for (auto &[val, c] : orig) {
+            if (transf.count(val) > 0)
+                continue;
+            issue.notes.push_back("outcome " + std::to_string(val) +
+                                  " disappeared (" + std::to_string(c) +
+                                  "/" + std::to_string(numRuns) +
+                                  " runs)");
+            if (c >= numRuns * kNovelOutcomeFrequency)
+                issue.hardFail = true;
+        }
 
         if (!issue.notes.empty())
             issues.push_back(std::move(issue));
     }
 
+    // if there are no issues, return a summary message indicating whether the outcome sets are identical or changed
     if (issues.empty()) {
         std::string msg =
             identical
@@ -162,9 +171,7 @@ static const std::string &ensureCampaignDir() {
     return gCampaignDir;
 }
 
-// Writes the artifacts of a run to logs/<campaign>/run<N>_seed<S>/.
-// Only files whose content is available are written; the folder is created
-// lazily, so a campaign with nothing logged leaves nothing behind.
+// Writes the artifacts of a run to logs
 static void saveRunArtifacts(const RunInfo &info,
                              const std::string &transformedMLIR,
                              const std::string &loweredMLIR,
@@ -290,10 +297,10 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // snapshot the JIT-ready LLVM IR
     jitLLVMStr = dumpLLVM(*moduleToTransformLLVM);
 
-    // execute both modules the same number of times and compare their outcome
-    // sets directly; there is no cached baseline to poison later comparisons
+    // execute both modules the same number of times and compare their outcomes
     std::string compileError;
 
+    // get outcome sets from both modules
     OutcomeCounts origCounts =
         ExecuteModule(*originalModuleLLVM, kRuns, &compileError);
     if (origCounts.empty()) {
@@ -312,6 +319,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         return setup.runInfo;
     }
 
+    // compare
     CompareResult cmp =
         CompareOutcomes(origCounts, transfCounts, kRuns, verbose);
 
@@ -327,7 +335,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     return setup.runInfo;
 }
 
-// core pipeline function, runs the metamorphic testing pipeline for the given options and returns a PipelineResult struct with the results of all runs
+// core pipeline function, runs the metamorphic testing pipeline for the given options
+// returns a PipelineResult struct with the results of all runs
 PipelineResult runPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);

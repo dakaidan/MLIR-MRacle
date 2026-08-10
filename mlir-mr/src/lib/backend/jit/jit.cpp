@@ -16,8 +16,10 @@
 #include <utility>
 #include <string>
 #include <vector>
+#include <algorithm>
 
-static void initNativeTargetOnce() {
+// initialise the native target and its asm printer/parser exactly once, even if multiple
+static void initNativeTarget() {
     static std::once_flag flag;
     std::call_once(flag, []() {
         llvm::InitializeNativeTarget();
@@ -46,7 +48,7 @@ static void addStateResetFunction(llvm::Module &module) {
     builder.CreateRetVoid();
 }
 
-// number of scalar results produced by the module's "main" function
+// returns the number of scalar results produced by the module's "main" function
 static unsigned getResultCount(llvm::Module &module) {
     auto *mainFn = module.getFunction("main");
     if (!mainFn || mainFn->isDeclaration())
@@ -58,9 +60,7 @@ static unsigned getResultCount(llvm::Module &module) {
 }
 
 // Adds a "__mlir_mr_run" wrapper that calls "main" and stores every result
-// into the "__mlir_mr_results" global (a buffer of int64_t, one slot per
-// result, in declaration order). This avoids ABI-specific struct-return
-// handling on the C++ side.
+// into the "__mlir_mr_results" global for later higher-level retrieval
 static void addResultCaptureFunction(llvm::Module &module) {
     auto &ctx = module.getContext();
     auto *mainFn = module.getFunction("main");
@@ -73,8 +73,8 @@ static void addResultCaptureFunction(llvm::Module &module) {
 
     auto *i64Ty = llvm::Type::getInt64Ty(ctx);
     auto *bufferTy = llvm::ArrayType::get(i64Ty, numResults);
-    // External linkage: the buffer is only written inside the module, so
-    // internal linkage would let the optimizer drop it as a dead global.
+
+    // Must be external linkage so that LLVM optimisation passes don't remove it as dead code
     auto *buffer = new llvm::GlobalVariable(
         module, bufferTy, false, llvm::GlobalValue::ExternalLinkage,
         llvm::ConstantAggregateZero::get(bufferTy), "__mlir_mr_results");
@@ -108,14 +108,14 @@ static void addResultCaptureFunction(llvm::Module &module) {
     builder.CreateRetVoid();
 }
 
-// For one-time compilation, and keeps the compiled code alive
+// One-time compilation to LLVM
 std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error) {
 
     if (error)
         error->clear();
-    initNativeTargetOnce();
+    initNativeTarget();
 
     auto jitOrErr = llvm::orc::LLJITBuilder().create();
     if (!jitOrErr) {
@@ -125,8 +125,7 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
         return nullptr;
     }
 
-    // Adopt the JIT instance; the shared_ptr keeps compiled code alive as long
-    // as the returned callable is referenced.
+    // shared_ptr keeps compiled code alive as long as the returned callable is referenced.
     std::shared_ptr<llvm::orc::LLJIT> jit(jitOrErr->release());
 
     unsigned numResults = module ? getResultCount(*module) : 0;

@@ -1,4 +1,5 @@
-#include "mlir-mr/core/api.h"
+#include "mlir-mr/core/core.h"
+#include "mlir-mr/io/io.h"
 
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
@@ -67,10 +68,9 @@ int main(int argc, char **argv) {
 
     llvm::json::Array arr;
     for (const auto &run : result.runs)
-        arr.push_back(run.toJson(opts.printMLIR));
+        arr.push_back(mlir_mr::runInfoToJson(run, opts.printMLIR));
 
     // all outputs are JSON arrays of run info
-    // stdout for outputs, stderr for errors
     llvm::outs() << llvm::json::Value(std::move(arr)) << "\n";
     return 0;
 }

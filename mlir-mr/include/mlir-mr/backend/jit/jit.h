@@ -12,15 +12,11 @@ namespace mlir_mr {
 struct RunInfo;
 }
 
+// Runs the given LLVM module in a JIT and returns the result of its "main" function.
 int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
                              mlir_mr::RunInfo *runInfo = nullptr);
 
-// Compiles the module once and returns a callable that runs its "main".
-// The callable resets all global state to the module's initial values before
-// every call, so repeated calls behave like fresh JIT compilations.
-// The returned vector holds one captured value per "main" result, in
-// declaration order; values are zero-extended/sign-extended to int64_t.
-// Returns nullptr on failure and fills *error.
+// Compiles the module once and returns a callable that runs its "main"
 std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error = nullptr);
