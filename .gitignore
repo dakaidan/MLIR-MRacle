@@ -70,3 +70,11 @@ fuzzing/corpus/generated/
 fuzzing/findings/
 
 fuzzing/tools/
+
+# Failed-run artifacts from mlir-mr-opt.
+logs/
+
+llvm-project/build/
+llvm-project/**/build/
+llvm-project/install/
+.vscode/

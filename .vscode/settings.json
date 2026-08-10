@@ -1,0 +1,21 @@
+{
+  "C_Cpp.files.exclude": {
+    "**/llvm-project/llvm/**": true,
+    "**/llvm-project/clang/**": true,
+    "**/llvm-project/clang-tools-extra/**": true,
+    "**/llvm-project/compiler-rt/**": true,
+    "**/llvm-project/libc/**": true,
+    "**/llvm-project/libcxx/**": true,
+    "**/llvm-project/libcxxabi/**": true,
+    "**/llvm-project/libunwind/**": true,
+    "**/llvm-project/lld/**": true,
+    "**/llvm-project/lldb/**": true,
+    "**/llvm-project/openmp/**": true,
+    "**/llvm-project/polly/**": true,
+    "**/llvm-project/flang/**": true,
+    "**/llvm-project/bolt/**": true,
+    "**/llvm-project/lnt/**": true,
+    "**/llvm-project/test-suite/**": true,
+    "**/llvm-project/third-party/**": true
+  }
+}

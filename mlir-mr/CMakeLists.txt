@@ -1,26 +1,7 @@
-# This starts as a header/source-free library so students can choose the public
-# API and directory layout in their MRs without deleting placeholder code.
-add_library(mlir_mr INTERFACE)
-add_library(MLIRMR::mlir_mr ALIAS mlir_mr)
+enable_language(CXX)
 
-target_compile_features(mlir_mr INTERFACE cxx_std_23)
-
-target_include_directories(mlir_mr INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-)
-
-# These targets come from the pinned LLVM/MLIR checkout configured by
-# conquer-opt. Add narrower dialect/transform libraries as implementations
-# require them.
-target_link_libraries(mlir_mr INTERFACE
-    MLIRIR
-    MLIRParser
-    MLIRPass
-    MLIRRewrite
-    MLIRSupport
-    MLIRTransforms
-    MLIRTosaDialect
-)
+add_subdirectory(src/lib)
+add_subdirectory(src/app)
 
 # Provides a stable Docker build target while mlir_mr has no source files.
 # Once mlir_mr becomes a STATIC library, this dependency builds it normally.
@@ -32,3 +13,11 @@ add_dependencies(mlir-mr-smoke mlir_mr)
 # Optional: uncomment when metamorphic transforms need CONQuER's TOSA
 # quantisation passes or custom dialect directly.
 # target_link_libraries(mlir_mr INTERFACE conquer_lib)
+
+# Must set MLIR_TABLEGEN_EXE and MLIR_TABLEGEN_TARGET to local vendored build
+# for MLIR to behave prperly and for mlir-mr to build properly.
+set(MLIR_TABLEGEN_EXE ${CMAKE_BINARY_DIR}/llvm_project_build/bin/mlir-tblgen)
+set(MLIR_TABLEGEN_TARGET mlir-tblgen)
+
+target_include_directories(mlir_mr INTERFACE ${CMAKE_CURRENT_BINARY_DIR})
+
