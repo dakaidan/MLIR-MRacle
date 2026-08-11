@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 // initialise the native target and its asm printer/parser exactly once, even if multiple
 static void initNativeTarget() {

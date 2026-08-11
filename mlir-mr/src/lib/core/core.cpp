@@ -10,6 +10,8 @@
 #include "mlir/Parser/Parser.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -18,6 +20,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
+#include <iostream>
 
 namespace mlir_mr {
 

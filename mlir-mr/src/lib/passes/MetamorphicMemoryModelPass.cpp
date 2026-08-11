@@ -529,3 +529,5 @@ std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
 #include "MetamorphicMemoryModelPass.inc"
 #include <list>
 #include <set>
+#include <map>
+#include <cmath>
