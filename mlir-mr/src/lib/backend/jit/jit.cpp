@@ -9,7 +9,11 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 
 #include <cstdint>
 #include <mutex>
@@ -27,6 +31,45 @@ static void initNativeTarget() {
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
     });
+}
+
+// The TSan runtime must be linked into the host binary at startup
+// (-fsanitize=thread): compiler-rt's TSan cannot be dlopen'd late on macOS,
+// and its Linux runtime is not on the loader path. JIT'd code then resolves
+// __tsan_* symbols against the already-initialised runtime.
+static bool loadTsanRuntime(std::string *error) {
+    if (llvm::sys::DynamicLibrary::SearchForAddressOfSymbol("__tsan_init"))
+        return true;
+    if (error)
+        *error = "TSan runtime not linked; rebuild with -fsanitize=thread";
+    return false;
+}
+
+// Instruments the module with ThreadSanitizer. TSan instruments every memory
+// access, perturbing scheduling so rare outcomes surface under concurrent
+// execution.
+static bool instrumentWithTsan(llvm::Module &module, std::string *error) {
+    if (!loadTsanRuntime(error))
+        return false;
+
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+
+    llvm::PassBuilder PB;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    llvm::ModulePassManager MPM;
+    MPM.addPass(
+        llvm::createModuleToFunctionPassAdaptor(llvm::ThreadSanitizerPass()));
+    MPM.addPass(llvm::ModuleThreadSanitizerPass());
+    MPM.run(module, MAM);
+    return true;
 }
 
 // Resetting global state is done to ensure that each run of the JIT starts with the same initial state
@@ -60,8 +103,9 @@ static unsigned getResultCount(llvm::Module &module) {
     return 1;
 }
 
-// Adds a "__mlir_mr_run" wrapper that calls "main" and stores every result
-// into the "__mlir_mr_results" global for later higher-level retrieval
+// Adds a "__mlir_mr_run(i64* results)" wrapper that calls "main" and stores
+// every result into the caller-provided buffer. Each concurrent caller passes
+// its own buffer, so result collection is race-free even with TSan active.
 static void addResultCaptureFunction(llvm::Module &module) {
     auto &ctx = module.getContext();
     auto *mainFn = module.getFunction("main");
@@ -73,15 +117,11 @@ static void addResultCaptureFunction(llvm::Module &module) {
         return;
 
     auto *i64Ty = llvm::Type::getInt64Ty(ctx);
-    auto *bufferTy = llvm::ArrayType::get(i64Ty, numResults);
-
-    // Must be external linkage so that LLVM optimisation passes don't remove it as dead code
-    auto *buffer = new llvm::GlobalVariable(
-        module, bufferTy, false, llvm::GlobalValue::ExternalLinkage,
-        llvm::ConstantAggregateZero::get(bufferTy), "__mlir_mr_results");
+    auto *i64PtrTy = llvm::PointerType::get(ctx, 0);
 
     auto *runFn = llvm::Function::Create(
-        llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), false),
+        llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), {i64PtrTy},
+                                false),
         llvm::GlobalValue::ExternalLinkage, "__mlir_mr_run", &module);
 
     llvm::IRBuilder<> builder(ctx);
@@ -101,9 +141,8 @@ static void addResultCaptureFunction(llvm::Module &module) {
         } else {
             continue; // non-integer scalar results are not captured
         }
-        llvm::Value *slot = builder.CreateInBoundsGEP(
-            bufferTy, buffer,
-            {builder.getInt32(0), builder.getInt32(i)});
+        llvm::Value *slot = builder.CreateGEP(
+            i64Ty, runFn->getArg(0), builder.getInt32(i));
         builder.CreateStore(v, slot);
     }
     builder.CreateRetVoid();
@@ -112,7 +151,8 @@ static void addResultCaptureFunction(llvm::Module &module) {
 // One-time compilation to LLVM
 std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
-    std::string *error) {
+    std::string *error,
+    bool enableTsan) {
 
     if (error)
         error->clear();
@@ -133,6 +173,8 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     if (module) {
         addStateResetFunction(*module);
         addResultCaptureFunction(*module);
+        if (enableTsan && !instrumentWithTsan(*module, error))
+            return nullptr;
     }
 
     if (auto err = jit->addIRModule(
@@ -150,27 +192,21 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
         return nullptr;
     }
     auto *runFn =
-        llvm::jitTargetAddressToPointer<void (*)()>(runSym->getValue());
+        llvm::jitTargetAddressToPointer<void (*)(int64_t *)>(runSym->getValue());
 
     void (*resetFn)() = nullptr;
     if (auto resetSym = jit->lookup("__mlir_mr_reset_state"))
         resetFn =
             llvm::jitTargetAddressToPointer<void (*)()>(resetSym->getValue());
 
-    auto resultsSym = jit->lookup("__mlir_mr_results");
-    if (!resultsSym) {
-        if (error)
-            *error = "result buffer not found";
-        return nullptr;
-    }
-    auto *resultsBuf =
-        llvm::jitTargetAddressToPointer<int64_t *>(resultsSym->getValue());
-
-    return [jit, runFn, resetFn, resultsBuf, numResults]() -> std::vector<int64_t> {
+    // each invocation gets its own stack buffer, so concurrent callers never
+    // share mutable state through the results channel
+    return [jit, runFn, resetFn, numResults]() -> std::vector<int64_t> {
+        std::vector<int64_t> results(numResults);
         if (resetFn)
             resetFn();
-        runFn();
-        return std::vector<int64_t>(resultsBuf, resultsBuf + numResults);
+        runFn(results.data());
+        return results;
     };
 }
 

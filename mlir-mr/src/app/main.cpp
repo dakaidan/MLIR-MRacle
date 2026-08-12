@@ -34,6 +34,10 @@ int main(int argc, char **argv) {
             opts.log = true;
         } else if (std::strcmp(argv[i], "--verbose") == 0) {
             opts.verbose = true;
+        } else if (std::strncmp(argv[i], "--tsan=", 7) == 0) {
+            opts.tsanPercent = std::strtol(argv[i] + 7, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--campaign-dir=", 15) == 0) {
+            opts.campaignDir = argv[i] + 15;
         } else {
             argv[newArgc++] = argv[i];
         }
@@ -44,7 +48,7 @@ int main(int argc, char **argv) {
         std::cerr << "usage: mlir-mr-opt [--print-mlir] [--log] [--seed=N] "
                      "[--run=N] [--runs=N] "
                      "[--transform=NAME[,NAME...]] "
-                     "[--multi=FOLDER] "
+                     "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "<path-to-mlir-file>\n";
         return 1;
     }

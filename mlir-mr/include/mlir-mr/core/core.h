@@ -2,31 +2,10 @@
 
 #include "mlir-mr/context/context.h"
 
-#include <map>
 #include <string>
 #include <vector>
-#include <cmath>
 
 namespace mlir_mr {
-
-// outcome frequencies map for each output variable of a module
-using OutcomeCounts = std::vector<std::map<int64_t, int>>;
-
-// data object describing comparison issues between two outcome sets
-struct VariableIssue {
-    std::string label;
-    std::string originalSet;
-    std::string transformedSet;
-    std::vector<std::string> notes;  // novel/disappeared detail lines
-    bool disjoint = false;
-    bool hardFail = false;
-};
-
-struct CompareResult {
-    bool ok = true;
-    bool warn = false;
-    std::string message;
-};
 
 // config for the runPipeline function
 struct PipelineOptions {
@@ -40,6 +19,8 @@ struct PipelineOptions {
     bool printMLIR = false;
     bool log = false;       // output transformed MLIR, lowered MLIR, and JIT LLVM IR to logs
     bool verbose = false;   // include full outcome sets in warn/fail details
+    int tsanPercent = 100;  // 0-100; share of compilations instrumented with TSan
+    std::string campaignDir; // resume/continue an existing campaign log folder
 };
 
 struct PipelineResult {
