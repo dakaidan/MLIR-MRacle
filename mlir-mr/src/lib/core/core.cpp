@@ -1,13 +1,16 @@
 #include "mlir-mr/core/core.h"
-
 #include "mlir-mr/backend/jit/jit.h"
 #include "mlir-mr/backend/lowering/lowering.h"
 #include "mlir-mr/io/io.h"
+#include "mlir-mr/oracle/oracle.h"
 
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -16,162 +19,251 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
-#include <algorithm>
-#include <cmath>
-#include <iostream>
 
 namespace mlir_mr {
 
-// per-campaign log subfolder, created lazily on first logged run
+// per-campaign log folder; the checkpoint file lives inside it
 static std::string gCampaignDir;
+static std::string gCheckpointPath;
 
-// number of executions per module per comparison
-constexpr int kRuns = 2000;
+// per-thread-level progress of one run
+struct ThreadCheckpoint {
+    std::string status = "pending"; // pending | running | done
+    int srcRuns = 0;                // executions reflected in srcCounts
+    int trRuns = 0;
+    OutcomeCounts srcCounts;
+    OutcomeCounts trCounts;
+    bool ok = true;                 // final verdict for done levels
+    bool warn = false;
+    std::string message;
+    int originalRuns = 0;           // final run counts for done levels
+    int transformedRuns = 0;
+    std::vector<FisherResult> variables;
+};
 
-// threshold for a novel outcome to be considered a genuine behavioural change
-constexpr double kNovelOutcomeFrequency = 0.05;
+// progress of one metamorphic run, keyed by "run<i>_seed<s>" in the
+// checkpoint file so interrupted campaigns resume exactly where they stopped
+struct RunCheckpoint {
+    std::string file;
+    int seed = 0;
+    std::vector<std::string> requestedTransforms;
+    std::vector<std::string> appliedTransformNames;
+    std::vector<std::string> appliedTransformTargets;
+    bool transformApplied = false;
+    std::string error;
+    std::string warn;
+    std::map<int, ThreadCheckpoint> threads;
+};
 
-// JIT executes a module and returns the outcome counts for each individual output variable
-static OutcomeCounts ExecuteModule(llvm::Module &module, int numRuns,
-                                   std::string *error) {
+static std::map<std::string, RunCheckpoint> gCheckpoints;
+
+// --- checkpoint persistence -------------------------------------------------
+
+static llvm::json::Array countsToJson(const OutcomeCounts &counts) {
+    llvm::json::Array arr;
+    for (const auto &m : counts) {
+        llvm::json::Array col;
+        for (const auto &[val, c] : m) {
+            llvm::json::Array pair;
+            pair.push_back(llvm::json::Value(val));
+            pair.push_back(llvm::json::Value(static_cast<int64_t>(c)));
+            col.push_back(std::move(pair));
+        }
+        arr.push_back(std::move(col));
+    }
+    return arr;
+}
+
+static OutcomeCounts countsFromJson(const llvm::json::Array *arr) {
     OutcomeCounts counts;
-
-    // module is cloned to avoid any side effects from the JIT'd code affecting the original module
-    auto fn = compileLLVMModuleToFunction(llvm::CloneModule(module), error);
-    if (!fn)
+    if (!arr)
         return counts;
-    for (int i = 0; i < numRuns; ++i) {
-        auto results = fn();
-        if (counts.size() < results.size())
-            counts.resize(results.size());
-        for (size_t r = 0; r < results.size(); ++r)
-            ++counts[r][results[r]];
+    counts.reserve(arr->size());
+    for (const auto &colVal : *arr) {
+        std::map<int64_t, int> m;
+        if (const auto *col = colVal.getAsArray())
+            for (const auto &pairVal : *col)
+                if (const auto *pair = pairVal.getAsArray();
+                    pair && pair->size() == 2)
+                    if (auto v = (*pair)[0].getAsInteger())
+                        if (auto c = (*pair)[1].getAsInteger())
+                            m[static_cast<int64_t>(*v)] =
+                                static_cast<int>(*c);
+        counts.push_back(std::move(m));
     }
     return counts;
 }
 
-// Compares the outcome counts of two modules and returns a summary of the comparison
-//
-// - If a novel outcome appears more than kNovelOutcomeFrequency -> hard fail
-// - If the outcome sets are disjoint -> hard fail
-// - If a novel outcome appears but below the threshold -> warn
-// - If an outcome disappears more than kNovelOutcomeFrequency -> hard fail
-// - If the outcome sets are identical -> ok
-//
-static CompareResult CompareOutcomes(const OutcomeCounts &originalCounts,
-                                     const OutcomeCounts &transformedCounts,
-                                     int numRuns, bool verbose) {
+static llvm::json::Object threadToJson(const ThreadCheckpoint &tc) {
+    llvm::json::Object o;
+    o["status"] = tc.status;
+    o["src_runs"] = static_cast<int64_t>(tc.srcRuns);
+    o["tr_runs"] = static_cast<int64_t>(tc.trRuns);
+    if (tc.status == "running") {
+        o["src_counts"] = countsToJson(tc.srcCounts);
+        o["tr_counts"] = countsToJson(tc.trCounts);
+    } else if (tc.status == "done") {
+        o["ok"] = tc.ok;
+        o["warn"] = tc.warn;
+        o["message"] = tc.message;
+        o["original_runs"] = static_cast<int64_t>(tc.originalRuns);
+        o["transformed_runs"] = static_cast<int64_t>(tc.transformedRuns);
+        llvm::json::Array vars;
+        for (const auto &fr : tc.variables)
+            vars.push_back(fisherResultToJson(fr));
+        o["variables"] = std::move(vars);
+    }
+    return o;
+}
 
-    // check that the two modules produce the same number of outputs                                    
-    if (originalCounts.size() != transformedCounts.size())
-        return {false, false,
-                "result arity mismatch: original produces " +
-                    std::to_string(originalCounts.size()) +
-                    " outputs, transformed produces " +
-                    std::to_string(transformedCounts.size())};
+static void threadFromJson(const llvm::json::Object *o, ThreadCheckpoint &tc) {
+    if (!o)
+        return;
+    if (auto s = o->getString("status"))
+        tc.status = s->str();
+    if (auto s = o->getInteger("src_runs"))
+        tc.srcRuns = static_cast<int>(*s);
+    if (auto s = o->getInteger("tr_runs"))
+        tc.trRuns = static_cast<int>(*s);
+    if (tc.status == "running") {
+        tc.srcCounts = countsFromJson(o->getArray("src_counts"));
+        tc.trCounts = countsFromJson(o->getArray("tr_counts"));
+    } else if (tc.status == "done") {
+        if (auto b = o->getBoolean("ok"))
+            tc.ok = *b;
+        if (auto b = o->getBoolean("warn"))
+            tc.warn = *b;
+        if (auto s = o->getString("message"))
+            tc.message = s->str();
+        if (auto s = o->getInteger("original_runs"))
+            tc.originalRuns = static_cast<int>(*s);
+        if (auto s = o->getInteger("transformed_runs"))
+            tc.transformedRuns = static_cast<int>(*s);
+        if (const auto *vars = o->getArray("variables"))
+            for (const auto &vv : *vars)
+                if (const auto *vo = vv.getAsObject()) {
+                    FisherResult fr;
+                    if (fisherResultFromJson(*vo, fr))
+                        tc.variables.push_back(std::move(fr));
+                }
+    }
+}
 
-    std::vector<VariableIssue> issues;
-    bool identical = true;
+static void saveCheckpoints() {
+    llvm::json::Object root;
+    llvm::json::Object runs;
+    for (const auto &[key, rc] : gCheckpoints) {
+        llvm::json::Object r;
+        r["file"] = rc.file;
+        r["seed"] = static_cast<int64_t>(rc.seed);
+        r["transform_applied"] = rc.transformApplied;
+        r["error"] = rc.error;
+        r["warn"] = rc.warn;
+        llvm::json::Array requested;
+        for (const auto &t : rc.requestedTransforms)
+            requested.push_back(t);
+        r["requested_transforms"] = std::move(requested);
+        llvm::json::Array applied;
+        for (size_t i = 0; i < rc.appliedTransformNames.size(); ++i) {
+            llvm::json::Object a;
+            a["name"] = rc.appliedTransformNames[i];
+            a["target_function"] =
+                i < rc.appliedTransformTargets.size()
+                    ? rc.appliedTransformTargets[i]
+                    : std::string();
+            applied.push_back(std::move(a));
+        }
+        r["applied_transforms"] = std::move(applied);
+        llvm::json::Object threads;
+        for (const auto &[t, tc] : rc.threads)
+            threads[std::to_string(t)] = threadToJson(tc);
+        r["threads"] = std::move(threads);
+        runs[key] = std::move(r);
+    }
+    root["runs"] = std::move(runs);
 
-    for (size_t i = 0; i < originalCounts.size(); ++i) {
-        const auto &orig = originalCounts[i];
-        const auto &transf = transformedCounts[i];
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    os << llvm::json::Value(std::move(root)) << "\n";
+    os.flush();
 
-        if (orig != transf)
-            identical = false;
+    std::string tmp = gCheckpointPath + ".tmp";
+    {
+        std::ofstream f(tmp);
+        f << buf;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, gCheckpointPath, ec);
+}
 
-        // label the output variable for reporting purposes
-        std::string label = originalCounts.size() == 1
-                                ? "output"
-                                : "output " + std::to_string(i);
-
-        bool anyOverlap = false;
-        bool anyNovel = false;
-
-        // check for any overlap or novel outcomes between the original and transformed outcome sets
-        for (auto &[val, _] : transf)
-            if (orig.count(val) > 0)
-                anyOverlap = true;
-            else
-                anyNovel = true;
-
-        VariableIssue issue;
-        issue.label = label;
-        issue.originalSet = formatOutcomeSet(orig);
-        issue.transformedSet = formatOutcomeSet(transf);
-
-        // sets disjoint -> hard fail
-        if (anyNovel && !anyOverlap) {
-            issue.disjoint = true;
-            issue.hardFail = true;
-            issues.push_back(std::move(issue));
+static void loadCheckpoints() {
+    std::ifstream f(gCheckpointPath);
+    if (!f)
+        return;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    auto parsed = llvm::json::parse(content);
+    if (!parsed)
+        return;
+    const auto *root = parsed->getAsObject();
+    const auto *runs = root ? root->getObject("runs") : nullptr;
+    if (!runs)
+        return;
+    for (const auto &kv : *runs) {
+        const auto *r = kv.second.getAsObject();
+        if (!r)
             continue;
-        }
-
-        // novel outcome appears over the threshold -> hard fail, else warn
-        for (auto &[val, c] : transf) {
-            if (orig.count(val) > 0)
-                continue;
-            std::string note =
-                "novel outcome " + std::to_string(val) + " (" +
-                std::to_string(c) + "/" + std::to_string(numRuns) +
-                " runs) " +
-                (c >= numRuns * kNovelOutcomeFrequency
-                     ? "exceeds " +
-                           std::to_string(static_cast<int>(
-                               kNovelOutcomeFrequency * 100)) +
-                           "% of runs"
-                     : "below failure threshold");
-            if (c >= numRuns * kNovelOutcomeFrequency)
-                issue.hardFail = true;
-            issue.notes.push_back(note);
-        }
-
-        // absent outcome disappears over the threshold -> hard fail, else warn
-        for (auto &[val, c] : orig) {
-            if (transf.count(val) > 0)
-                continue;
-            issue.notes.push_back("outcome " + std::to_string(val) +
-                                  " disappeared (" + std::to_string(c) +
-                                  "/" + std::to_string(numRuns) +
-                                  " runs)");
-            if (c >= numRuns * kNovelOutcomeFrequency)
-                issue.hardFail = true;
-        }
-
-        if (!issue.notes.empty())
-            issues.push_back(std::move(issue));
+        RunCheckpoint rc;
+        if (auto s = r->getString("file"))
+            rc.file = s->str();
+        if (auto s = r->getInteger("seed"))
+            rc.seed = static_cast<int>(*s);
+        if (auto b = r->getBoolean("transform_applied"))
+            rc.transformApplied = *b;
+        if (auto s = r->getString("error"))
+            rc.error = s->str();
+        if (auto s = r->getString("warn"))
+            rc.warn = s->str();
+        if (const auto *requested = r->getArray("requested_transforms"))
+            for (const auto &rv : *requested)
+                if (auto s = rv.getAsString())
+                    rc.requestedTransforms.push_back(s->str());
+        if (const auto *applied = r->getArray("applied_transforms"))
+            for (const auto &av : *applied)
+                if (const auto *ao = av.getAsObject()) {
+                    if (auto s = ao->getString("name"))
+                        rc.appliedTransformNames.push_back(s->str());
+                    if (auto s = ao->getString("target_function"))
+                        rc.appliedTransformTargets.push_back(s->str());
+                }
+        if (const auto *threads = r->getObject("threads"))
+            for (const auto &kv : *threads) {
+                ThreadCheckpoint tc;
+                threadFromJson(kv.second.getAsObject(), tc);
+                rc.threads[std::stoi(kv.first.str())] = std::move(tc);
+            }
+        gCheckpoints[kv.first.str()] = std::move(rc);
     }
+}
 
-    // if there are no issues, return a summary message indicating whether the outcome sets are identical or changed
-    if (issues.empty()) {
-        std::string msg =
-            identical
-                ? "identical outcome maps over " + std::to_string(numRuns) +
-                      " runs"
-                : "outcome sets changed over " + std::to_string(numRuns) +
-                      " runs";
-        return {true, false, msg};
-    }
-
-    return renderComparison(numRuns, verbose, issues);
+static bool allThreadsDone(const RunCheckpoint &rc) {
+    if (rc.threads.empty())
+        return false;
+    for (const auto &[t, tc] : rc.threads)
+        if (tc.status != "done")
+            return false;
+    return true;
 }
 
 // Lazily creates the per-campaign log folder and returns its path.
 static const std::string &ensureCampaignDir() {
-    if (gCampaignDir.empty()) {
-        using namespace std::chrono;
-        auto millis = duration_cast<milliseconds>(
-            system_clock::now().time_since_epoch()).count();
-        gCampaignDir =
-            (std::filesystem::path("logs") /
-             ("campaign_" + std::to_string(millis))).string();
-        std::error_code ec;
-        std::filesystem::create_directories(gCampaignDir, ec);
-    }
+    std::error_code ec;
+    std::filesystem::create_directories(gCampaignDir, ec);
     return gCampaignDir;
 }
 
@@ -214,11 +306,13 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
     return files;
 }
 
-// single run mode, returns a RunInfo struct with the results of the run
+// single run mode, returns a RunInfo struct with the results of the run.
+// cp records per-thread progress into the campaign checkpoint so a killed
+// invocation can be resumed without discarding executed batches.
 static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
                          int maxApply, bool printMLIR, bool log,
-                         bool verbose) {
+                         bool verbose, int tsanPercent, RunCheckpoint &cp) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     setup.runInfo.file = inputFile;
 
@@ -301,36 +395,170 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // snapshot the JIT-ready LLVM IR
     jitLLVMStr = dumpLLVM(*moduleToTransformLLVM);
 
-    // execute both modules the same number of times and compare their outcomes
+    // TSan instruments memory accesses and perturbs scheduling, surfacing
+    // rare outcomes; applying it to a share of runs keeps that probing
+    // without paying the instrumentation cost on every run. The decision is
+    // made per run (seeded, so reproducible) and applies to both modules so
+    // the comparison is never between differently-instrumented code.
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> tsanDist(0, 99);
+    bool useTsan = tsanDist(rng) < tsanPercent;
+
+    // record what this run applied, so a skipped run can be reconstructed
+    // from the checkpoint instead of being re-executed
+    cp.requestedTransforms = setup.runInfo.requestedTransforms;
+    cp.transformApplied = setup.runInfo.transformApplied;
+    cp.appliedTransformNames.clear();
+    cp.appliedTransformTargets.clear();
+    for (const auto &at : setup.runInfo.appliedTransforms) {
+        cp.appliedTransformNames.push_back(at.name);
+        cp.appliedTransformTargets.push_back(at.targetFunction);
+    }
+
     std::string compileError;
 
-    // get outcome sets from both modules
-    OutcomeCounts origCounts =
-        ExecuteModule(*originalModuleLLVM, kRuns, &compileError);
-    if (origCounts.empty()) {
+    // the 1-thread determinism check never uses TSan; the multi-threaded
+    // comparisons use the variant chosen above. Both modules are always
+    // compiled plain so the deterministic single-thread check runs first
+    // without paying for instrumentation it does not need.
+    auto origPlain = compileLLVMModuleToFunction(
+        llvm::CloneModule(*originalModuleLLVM), &compileError, false);
+    if (!origPlain) {
         setup.runInfo.error =
             "JIT compile error (original): " + compileError;
         saveArtifacts();
         return setup.runInfo;
     }
-
-    OutcomeCounts transfCounts =
-        ExecuteModule(*moduleToTransformLLVM, kRuns, &compileError);
-    if (transfCounts.empty()) {
+    auto transfPlain = compileLLVMModuleToFunction(
+        llvm::CloneModule(*moduleToTransformLLVM), &compileError, false);
+    if (!transfPlain) {
         setup.runInfo.error =
             "JIT compile error (transformed): " + compileError;
         saveArtifacts();
         return setup.runInfo;
     }
 
-    // compare
-    CompareResult cmp =
-        CompareOutcomes(origCounts, transfCounts, kRuns, verbose);
+    std::function<std::vector<int64_t>()> origTsan, transfTsan;
+    if (useTsan) {
+        origTsan = compileLLVMModuleToFunction(
+            llvm::CloneModule(*originalModuleLLVM), &compileError, true);
+        if (!origTsan) {
+            setup.runInfo.error =
+                "JIT compile error (original): " + compileError;
+            saveArtifacts();
+            return setup.runInfo;
+        }
+        transfTsan = compileLLVMModuleToFunction(
+            llvm::CloneModule(*moduleToTransformLLVM), &compileError, true);
+        if (!transfTsan) {
+            setup.runInfo.error =
+                "JIT compile error (transformed): " + compileError;
+            saveArtifacts();
+            return setup.runInfo;
+        }
+    }
 
-    if (!cmp.ok)
-        setup.runInfo.error = cmp.message;
-    if (cmp.warn)
-        setup.runInfo.warn = cmp.message;
+    // compare outcomes for each thread count separately. The 1-thread group
+    // is a determinism check (no concurrency means no TSan either); the
+    // multi-threaded groups run both programs in lockstep batches with a
+    // Fisher exact test per output variable, stopping early on confident
+    // pass/fail verdicts. Progress is checkpointed after every batch.
+    for (int t : kThreadCounts) {
+        ThreadCheckpoint &tc = cp.threads[t];
+
+        // a level completed in a previous invocation is replayed from the
+        // checkpoint instead of re-executed
+        if (tc.status == "done") {
+            setup.runInfo.threadResults.push_back(
+                {t, {tc.ok, tc.warn, tc.message}, tc.originalRuns,
+                 tc.transformedRuns, tc.variables});
+            if (!tc.ok) {
+                setup.runInfo.error =
+                    "threads=" + std::to_string(t) + ": " + tc.message;
+                break;
+            }
+            if (tc.warn)
+                setup.runInfo.warn = tc.message;
+            continue;
+        }
+
+        if (t == 1) {
+            OutcomeCounts origCounts =
+                executeCompiled(origPlain, kRunsSingle, 1);
+            OutcomeCounts transfCounts =
+                executeCompiled(transfPlain, kRunsSingle, 1);
+            CompareResult cmp =
+                compareSingleThread(origCounts, transfCounts, kRunsSingle);
+            setup.runInfo.threadResults.push_back(
+                {t, cmp, kRunsSingle, kRunsSingle, {}});
+            tc.status = "done";
+            tc.ok = cmp.ok;
+            tc.warn = cmp.warn;
+            tc.message = cmp.message;
+            tc.originalRuns = kRunsSingle;
+            tc.transformedRuns = kRunsSingle;
+            tc.variables.clear();
+            saveCheckpoints();
+            if (!cmp.ok) {
+                setup.runInfo.error = "threads=1: " + cmp.message;
+                break;
+            }
+            if (cmp.warn)
+                setup.runInfo.warn = cmp.message;
+            continue;
+        }
+
+        int maxRuns = t == 2 ? kRunsPrimary : kRunsSecondary;
+        int batchSize = t == 2 ? kBatchPrimary : kBatchSecondary;
+        const auto &origFn = useTsan ? origTsan : origPlain;
+        const auto &transfFn = useTsan ? transfTsan : transfPlain;
+
+        // resume from checkpointed counts when the previous invocation was
+        // interrupted mid-level; otherwise start fresh
+        OutcomeCounts resumeSrc =
+            tc.status == "running" ? tc.srcCounts : OutcomeCounts{};
+        OutcomeCounts resumeTr =
+            tc.status == "running" ? tc.trCounts : OutcomeCounts{};
+        tc.status = "running";
+
+        SequentialResult seq = compareSequential(
+            origFn, transfFn, t, maxRuns, batchSize, resumeSrc, resumeTr,
+            [&](const OutcomeCounts &src, const OutcomeCounts &tr,
+                int srcRuns, int trRuns) {
+                tc.srcCounts = src;
+                tc.trCounts = tr;
+                tc.srcRuns = srcRuns;
+                tc.trRuns = trRuns;
+                saveCheckpoints();
+            });
+
+        CompareResult cmp = sequentialToCompareResult(seq, t, verbose);
+        setup.runInfo.threadResults.push_back(
+            {t, cmp, seq.sourceRuns, seq.transformedRuns, seq.variables});
+
+        tc.status = "done";
+        tc.ok = cmp.ok;
+        tc.warn = cmp.warn;
+        tc.message = cmp.message;
+        tc.originalRuns = seq.sourceRuns;
+        tc.transformedRuns = seq.transformedRuns;
+        tc.variables = seq.variables;
+        tc.srcCounts.clear();
+        tc.trCounts.clear();
+        saveCheckpoints();
+
+        if (!cmp.ok) {
+            setup.runInfo.error =
+                "threads=" + std::to_string(t) + ": " + cmp.message;
+            break;
+        }
+        if (cmp.warn)
+            setup.runInfo.warn = cmp.message;
+    }
+
+    cp.error = setup.runInfo.error;
+    cp.warn = setup.runInfo.warn;
+    saveCheckpoints();
 
     // failures are always logged; successful runs only with --log
     if (!setup.runInfo.error.empty() || log)
@@ -345,9 +573,26 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);
 
-    // each pipeline invocation gets its own log folder; created lazily
-    // on the first logged run
+    // the campaign folder is fixed by the user for resumable campaigns or
+    // timestamped otherwise; the checkpoint file lives inside it
     gCampaignDir.clear();
+    gCheckpointPath.clear();
+    gCheckpoints.clear();
+    if (!opts.campaignDir.empty()) {
+        gCampaignDir = opts.campaignDir;
+    } else {
+        using namespace std::chrono;
+        auto millis = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()).count();
+        gCampaignDir =
+            (std::filesystem::path("logs") /
+             ("campaign_" + std::to_string(millis))).string();
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(gCampaignDir, ec);
+    gCheckpointPath =
+        (std::filesystem::path(gCampaignDir) / "checkpoint.json").string();
+    loadCheckpoints();
 
     // if multi mode is requested, collect all .mlir files in the given folder
     // if none are found return a RunInfo with an error
@@ -385,10 +630,45 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
 
         // run single run and collect the RunInfo; errors and warnings are
         // carried inside the RunInfo and surfaced by the caller, not printed
-        // here, so stdout stays machine-parseable
+        // here, so stdout stays machine-parseable. Runs and seeds are
+        // deterministic from the options, so a run whose thread levels all
+        // completed in a previous invocation is reconstructed from the
+        // checkpoint instead of being executed again.
+        std::string runKey = "run" + std::to_string(runIdx) + "_seed" +
+                             std::to_string(runSeed);
+        RunCheckpoint &cp = gCheckpoints[runKey];
+        if (cp.file.empty()) {
+            cp.file = inputFile;
+            cp.seed = runSeed;
+        }
+
+        if (allThreadsDone(cp)) {
+            RunInfo info;
+            info.runNumber = runIdx;
+            info.seed = runSeed;
+            info.file = cp.file;
+            info.requestedTransforms = cp.requestedTransforms;
+            info.transformApplied = cp.transformApplied;
+            for (size_t k = 0; k < cp.appliedTransformNames.size(); ++k)
+                info.appliedTransforms.push_back(
+                    {cp.appliedTransformNames[k],
+                     k < cp.appliedTransformTargets.size()
+                         ? cp.appliedTransformTargets[k]
+                         : std::string()});
+            for (const auto &[t, tc] : cp.threads)
+                info.threadResults.push_back(
+                    {t, {tc.ok, tc.warn, tc.message}, tc.originalRuns,
+                     tc.transformedRuns, tc.variables});
+            info.error = cp.error;
+            info.warn = cp.warn;
+            result.runs.push_back(std::move(info));
+            continue;
+        }
+
         RunInfo info = runSingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
-                                 opts.printMLIR, opts.log, opts.verbose);
+                                 opts.printMLIR, opts.log, opts.verbose,
+                                 opts.tsanPercent, cp);
 
         result.runs.push_back(std::move(info));
     }

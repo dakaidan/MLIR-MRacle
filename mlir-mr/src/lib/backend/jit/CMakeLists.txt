@@ -18,6 +18,9 @@ target_link_libraries(mlir_mr_jit PUBLIC
     LLVMJITLink
     LLVMOrcTargetProcess
     LLVMExecutionEngine
+    LLVMInstrumentation
+    LLVMTransformUtils
+    LLVMPasses
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")

@@ -76,6 +76,14 @@ def main():
         "--log", action="store_true",
         help="log the transformed MLIR, LLVM IR and executable to the logs folder"
     )
+    parser.add_argument(
+        "--tsan", type=int, default=100,
+        help="percentage of compilations instrumented with TSan (0-100, default 100)"
+    )
+    parser.add_argument(
+        "--campaign-dir", metavar="PATH",
+        help="resume/continue a campaign in an existing log folder"
+    )
 
     args = parser.parse_args()
 
@@ -111,6 +119,10 @@ def main():
         cmd.append(f"--transform={','.join(transforms)}")
     if args.apply:
         cmd.append(f"--apply={args.apply}")
+    if args.tsan is not None:
+        cmd.append(f"--tsan={args.tsan}")
+    if args.campaign_dir:
+        cmd.append(f"--campaign-dir={args.campaign_dir}")
     cmd.append(f"--runs={args.runs}")
     if args.multi:
         cmd.append(f"--multi={args.multi}")
@@ -156,21 +168,22 @@ def main():
         else:
             status = "[OK]"
         applied = run.get("applied_transforms", [])
-        xform = ", ".join(
-            f"{t['name']}@{t.get('target_function', '?')}"
-            for t in applied
-        ) if applied else "none"
-        line = f"{status} run {run['run']}, seed {run['seed']}, " \
-               f"file {run['file']}, transform(s): {xform}"
+        # transforms are only reported for warn/fail runs, always, so the
+        # [OK] lines stay compact
+        if is_error or is_warn:
+            xform = ", ".join(
+                f"{t['name']}@{t.get('target_function', '?')}"
+                for t in applied
+            ) if applied else "none"
+            line = f"{status} run {run['run']}, seed {run['seed']}, " \
+                   f"file {run['file']}, transform(s): {xform}"
+        else:
+            line = f"{status} run {run['run']}, seed {run['seed']}, " \
+                   f"file {run['file']}"
         if is_error:
             errors.append(f"{line}\n       error: {run['error']}")
         elif is_warn:
-            # warn detail is raw C++ analysis text; only surface it in
-            # verbose mode so the default view stays python-level only
-            if args.verbose:
-                warns.append(f"{line}\n{run['warn']}")
-            else:
-                warns.append(line)
+            warns.append(f"{line}\n{run['warn']}")
         else:
             summary.append(line)
 

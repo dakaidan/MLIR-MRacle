@@ -10,4 +10,6 @@ endif()
 find_package(OpenMP REQUIRED)
 
 add_executable(mlir_mr_opt main.cpp)
+target_compile_options(mlir_mr_opt PRIVATE -fsanitize=thread)
+target_link_options(mlir_mr_opt PRIVATE -fsanitize=thread)
 target_link_libraries(mlir_mr_opt PRIVATE MLIRMR::mlir_mr OpenMP::OpenMP_CXX)
