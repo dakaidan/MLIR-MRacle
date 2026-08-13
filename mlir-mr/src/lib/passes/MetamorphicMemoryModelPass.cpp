@@ -58,6 +58,8 @@ static Operation *getThreadContainer(memref::AtomicRMWOp atomic) {
 // A thread‑atomic RMW:
 //  - runs inside an omp region,
 //  - has an unused result (store‑only semantic),
+//  - is a direct child of the thread body (moving it out of nested control
+//    flow such as scf.if would drop its guard), and
 //  - only uses operands defined outside the enclosing parallel region.
 // Such RMWs can safely be moved between threads.
 static bool isThreadAtomic(memref::AtomicRMWOp atomic) {
@@ -65,10 +67,25 @@ static bool isThreadAtomic(memref::AtomicRMWOp atomic) {
     if (!enclosing || !atomic.getResult().use_empty())
         return false;
 
+    Operation *container = getThreadContainer(atomic);
+    if (!container || atomic->getBlock() != &container->getRegion(0).front())
+        return false;
+
     return llvm::all_of(atomic->getOperands(), [&](Value v) {
         Operation *defOp = v.getDefiningOp();
         return defOp && !enclosing->isAncestor(defOp);
     });
+}
+
+// True if two atomic RMWs are interchangeable: same value, memref and
+// indices, so they touch exactly the same location with the same amount.
+static bool operandsEqual(memref::AtomicRMWOp a, memref::AtomicRMWOp b) {
+    if (a.getNumOperands() != b.getNumOperands())
+        return false;
+    for (auto [lhs, rhs] : llvm::zip_equal(a->getOperands(), b->getOperands()))
+        if (lhs != rhs)
+            return false;
+    return true;
 }
 
 // True if the op executes inside a thread region (omp.section or omp.parallel).
@@ -227,9 +244,14 @@ private:
             if (isThreadAtomic(atomic)) {
                 auto key =
                     std::make_pair(atomic.getMemref(), atomic.getKind());
-                groups[key].push_back(atomic);
-                if (!firstIdx.count(key))
-                    firstIdx[key] = idx;
+                auto &group = groups[key];
+                // Only structurally identical RMWs (same value, memref and
+                // indices) are interchangeable, so only add equal ops.
+                if (group.empty() || operandsEqual(group.front(), atomic)) {
+                    group.push_back(atomic);
+                    if (!firstIdx.count(key))
+                        firstIdx[key] = idx;
+                }
             }
             ++idx;
         });
