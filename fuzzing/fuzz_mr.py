@@ -55,18 +55,26 @@ def main():
     parser.add_argument(
         "file", nargs="?", help="path to a single .mlir file"
     )
-    parser.add_argument(
-        "--multi", metavar="FOLDER",
-        help="folder of .mlir files; random one selected per run"
-    )
-    parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--print-mlir", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--binary", help="override path to mlir_mr_opt")
     parser.add_argument("--seed", type=int, help="fixed seed for all runs")
+    parser.add_argument(
+        "--run", action="store_true",
+        help="execution mode: run each file as-is, record joint outcome sets"
+    )
+    parser.add_argument(
+        "--reps", type=int, default=10000,
+        help="executions per program per thread count (default 10000)"
+    )
+    parser.add_argument(
+        "--iter", type=int, default=1,
+        help="number of pipeline repetitions (default 1)"
+    )
     parser.add_argument(
         "--transform", action="append", default=[],
         help="transformation(s) to apply; repeat the flag or comma-separate names"
+    )
+    parser.add_argument(
+        "--multi", metavar="FOLDER",
+        help="folder of .mlir files; random one selected per run"
     )
     parser.add_argument(
         "--apply", type=int, default=1,
@@ -84,17 +92,31 @@ def main():
         "--campaign-dir", metavar="PATH",
         help="resume/continue a campaign in an existing log folder"
     )
-
+    parser.add_argument(
+        "--threshold", type=int, default=5,
+        help="transformed-only outcomes below this percent of transformed runs "
+             "are WARN, above are FAIL (default 5)"
+    )
+    parser.add_argument(
+        "--reruns", type=int, default=5000,
+        help="extra source runs when the transformed side finds a new outcome "
+             "(default 5000)"
+    )
+    parser.add_argument(
+        "--max-runs", type=int, default=25000,
+        help="hard cap for source runs per baseline (default 25000)"
+    )
+    parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mr_opt")
     args = parser.parse_args()
 
     if args.file and args.multi:
         sys.exit("Cannot specify both FILE and --multi.")
     if not args.file and not args.multi:
         sys.exit("Must provide either FILE or --multi FOLDER.")
-    if args.print_mlir and args.runs > 1:
-        sys.exit("--print-mlir option only available for a singular run.")
-    if args.apply < 1:
-        sys.exit("--apply must be at least 1.")
+    if args.apply < 0:
+        sys.exit("--apply must be >= 0.")
+    if args.reps <= 0:
+        sys.exit("--reps must be > 0.")
 
     binary = Path(args.binary) if args.binary else find_binary()
     if not binary:
@@ -102,14 +124,12 @@ def main():
         binary = build_binary()
 
     cmd = [str(binary)]
-    if args.print_mlir:
-        cmd.append("--print-mlir")
-    if args.log:
-        cmd.append("--log")
-    if args.verbose:
-        cmd.append("--verbose")
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
+    if args.run:
+        cmd.append("--run")
+    cmd.append(f"--reps={args.reps}")
+    cmd.append(f"--iter={args.iter}")
     transforms = []
     for value in args.transform:
         transforms.extend(
@@ -117,97 +137,62 @@ def main():
         )
     if transforms:
         cmd.append(f"--transform={','.join(transforms)}")
-    if args.apply:
-        cmd.append(f"--apply={args.apply}")
-    if args.tsan is not None:
-        cmd.append(f"--tsan={args.tsan}")
-    if args.campaign_dir:
-        cmd.append(f"--campaign-dir={args.campaign_dir}")
-    cmd.append(f"--runs={args.runs}")
     if args.multi:
         cmd.append(f"--multi={args.multi}")
+    cmd.append(f"--apply={args.apply}")
+    if args.log:
+        cmd.append("--log")
+    cmd.append(f"--tsan={args.tsan}")
+    cmd.append(f"--threshold={args.threshold}")
+    cmd.append(f"--reruns={args.reruns}")
+    cmd.append(f"--max-runs={args.max_runs}")
+    if args.campaign_dir:
+        cmd.append(f"--campaign-dir={args.campaign_dir}")
     if args.file:
         cmd.append(args.file)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
-    runs = []
-    raw = result.stdout
-    start = raw.find("[")
-    end = raw.rfind("]")
-
-    # parse the JSON array of run info from stdout
-    if start != -1 and end != -1 and end > start:
-        try:
-            runs = json.loads(raw[start:end + 1])
-        except json.JSONDecodeError:
-            sys.stderr.write(result.stderr)
-            sys.stderr.write("failed to parse JSON from stdout\n")
-            sys.stderr.write(raw)
-            sys.exit(1)
-    elif raw.strip():
+    if result.returncode != 0:
         sys.stderr.write(result.stderr)
-        sys.stderr.write("no JSON array found in stdout\n")
-        sys.stderr.write(raw)
-        sys.exit(1)
+        sys.exit(result.returncode)
 
-    # collect run lines; error and warn runs are deferred so they print
-    # together at the end, regardless of verbosity
-    summary = []
-    errors = []
-    warns = []
+    campaign_dir = result.stdout.strip()
+    if not campaign_dir:
+        sys.stderr.write(result.stderr)
+        sys.exit("no campaign dir on stdout")
+
+    result_path = Path(campaign_dir) / "result.json"
+    try:
+        runs = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(result.stderr)
+        sys.exit(f"failed to read {result_path}: {exc}")
+
+    if args.run:
+        ok = fail = 0
+        for run in runs:
+            if run.get("error"):
+                fail += 1
+            else:
+                ok += 1
+        print("=== Campaign completed ===")
+        print(f"OK: {ok}  WARN: 0  FAIL: {fail}")
+        print(f"Campaign directory: {campaign_dir}")
+        return 0
+
+    ok = warn = fail = 0
     for run in runs:
-        is_error = run.get("error", "") != ""
-        is_warn = run.get("warn", "") != ""
-        if not (args.verbose or is_error or is_warn):
-            continue
-        if is_error:
-            status = "[FAIL]"
-        elif is_warn:
-            status = "[WARN]"
+        status = run.get("status", "OK")
+        if status == "ERROR":
+            fail += 1
+        elif status == "WARN":
+            warn += 1
         else:
-            status = "[OK]"
-        applied = run.get("applied_transforms", [])
-        # transforms are only reported for warn/fail runs, always, so the
-        # [OK] lines stay compact
-        if is_error or is_warn:
-            xform = ", ".join(
-                f"{t['name']}@{t.get('target_function', '?')}"
-                for t in applied
-            ) if applied else "none"
-            line = f"{status} run {run['run']}, seed {run['seed']}, " \
-                   f"file {run['file']}, transform(s): {xform}"
-        else:
-            line = f"{status} run {run['run']}, seed {run['seed']}, " \
-                   f"file {run['file']}"
-        if is_error:
-            errors.append(f"{line}\n       error: {run['error']}")
-        elif is_warn:
-            warns.append(f"{line}\n{run['warn']}")
-        else:
-            summary.append(line)
-
-    for line in summary:
-        print(line)
-
-    # if singular run and --print-mlir, print the MLIR output to stdout
-    if args.print_mlir and runs:
-        mlir = runs[0].get("mlir_output", "")
-        if mlir:
-            sys.stdout.write(mlir)
-
-    # collect raw binary stderr and per-run failures/warnings into one block
-    # at the end; warns are shown as plain status lines, under all run results
-    if errors or warns or result.stderr.strip():
-        print("-" * 60)
-        if result.stderr.strip():
-            sys.stdout.write(result.stderr)
-            if not result.stderr.endswith("\n"):
-                sys.stdout.write("\n")
-        for line in warns:
-            print(line)
-        for line in errors:
-            print(line)
+            ok += 1
+    print("=== Campaign completed ===")
+    print(f"OK: {ok}  WARN: {warn}  FAIL: {fail}")
+    print(f"Campaign directory: {campaign_dir}")
 
 
 if __name__ == "__main__":

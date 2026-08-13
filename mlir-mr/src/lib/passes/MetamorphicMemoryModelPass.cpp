@@ -135,7 +135,9 @@ struct MetamorphicMemoryModelPass
             {"insert-fence", &MetamorphicMemoryModelPass::tryInsertFence},
             // {"insert-thread", &MetamorphicMemoryModelPass::tryInsertThread},
             {"insert-atomic-rmw", &MetamorphicMemoryModelPass::tryInsertAtomicRMWInThread},
-            {"local-store-duplication", &MetamorphicMemoryModelPass::tryLocalStoreDuplication}
+            {"local-store-duplication", &MetamorphicMemoryModelPass::tryLocalStoreDuplication},
+            {"try-insert-random-arith", &MetamorphicMemoryModelPass::tryInsertRandomArith},
+            {"try-insert-comparison", &MetamorphicMemoryModelPass::tryInsertComparison},
         };
 
         SmallVector<std::pair<std::string, Transform>, 4> transforms;
@@ -164,6 +166,10 @@ struct MetamorphicMemoryModelPass
             llvm::erase_if(transforms, [&](const auto &t) {
                 return !llvm::is_contained(requestedNames, t.first);
             });
+        std::sort(transforms.begin(), transforms.end(),
+                  [](const auto &a, const auto &b) {
+                      return a.first < b.first;
+                  });
         if (runInfo)
             for (llvm::StringRef name : requestedNames)
                 runInfo->requestedTransforms.push_back(name.str());
@@ -215,9 +221,17 @@ private:
 
         // find all thread-atomic RMWs and group them by (memref, kind)
         RmwGroupMap groups;
+        llvm::DenseMap<std::pair<Value, arith::AtomicRMWKind>, size_t> firstIdx;
+        size_t idx = 0;
         op.walk([&](memref::AtomicRMWOp atomic) {
-            if (isThreadAtomic(atomic))
-                groups[{atomic.getMemref(), atomic.getKind()}].push_back(atomic);
+            if (isThreadAtomic(atomic)) {
+                auto key =
+                    std::make_pair(atomic.getMemref(), atomic.getKind());
+                groups[key].push_back(atomic);
+                if (!firstIdx.count(key))
+                    firstIdx[key] = idx;
+            }
+            ++idx;
         });
 
         // if group size > 2 and the kind is commutative and associative, add to candidates
@@ -225,6 +239,10 @@ private:
         for (const auto &kv : groups)
             if (kv.second.size() >= 2 && isCommutativeAssociative(kv.first.second))
                 candidates.push_back(kv.first);
+        std::sort(candidates.begin(), candidates.end(),
+                  [&](const auto &a, const auto &b) {
+                      return firstIdx.lookup(a) < firstIdx.lookup(b);
+                  });
 
         if (candidates.empty())
             return false;
@@ -506,6 +524,110 @@ private:
         // Insert a duplicate store after the original store
         rewriter.setInsertionPointAfter(store);
         rewriter.clone(*store);
+
+        return true;
+    }
+
+    // Randomly insert a fresh memref and a chain of arith ops
+    // Keep going until max chain length of 5 is hit, or a store is inserted back to the memref, which stops the chain
+    bool tryInsertRandomArith(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        SmallVector<Operation *> allOps;
+        
+        op.getBody().walk([&](Operation *innerOp) {
+            // omp.sections regions only allow omp.section ops and a terminator,
+            // so never insert generated ops as a direct child of one.
+            if (isa<omp::SectionsOp>(innerOp->getParentOp()))
+                return;
+            allOps.push_back(innerOp);
+        });
+
+        if (allOps.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, allOps.size() - 1);
+        rewriter.setInsertionPoint(allOps[dist(rng)]);
+
+        Location loc = op.getLoc();
+
+        // i64 1-D memref
+        auto memrefType = MemRefType::get(
+            {static_cast<int64_t>(std::uniform_int_distribution<int>(1, 16)(rng))},
+            rewriter.getI64Type());
+        auto memref = memref::AllocaOp::create(rewriter, loc, memrefType,
+                                               /*dynamicSizes=*/ValueRange{},
+                                               /*alignment=*/IntegerAttr{});
+
+        auto zeroIdx = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        Value acc = memref::LoadOp::create(rewriter, loc, memref, ValueRange{zeroIdx});
+
+        std::uniform_int_distribution<int64_t> intDist(-100, 100);
+        auto makeConst = [&]() {
+            return arith::ConstantOp::create(
+                rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(intDist(rng)));
+        };
+
+        std::uniform_int_distribution<int> opDist(0, 2);
+        auto makeArith = [&](Value lhs) -> Value {
+            Value rhs = makeConst();
+            switch (opDist(rng)) {
+            case 0: return arith::AddIOp::create(rewriter, loc, lhs, rhs);
+            case 1: return arith::SubIOp::create(rewriter, loc, lhs, rhs);
+            default: return arith::MulIOp::create(rewriter, loc, lhs, rhs);
+            }
+        };
+
+        // random number of chained arith ops, capped at 5
+        int chain = std::uniform_int_distribution<int>(1, 5)(rng);
+        for (int i = 0; i < chain; ++i)
+            acc = makeArith(acc);
+
+        // coinflip between continuing the chain or storing back to the memref
+        std::bernoulli_distribution coin(0.5);
+        while (coin(rng)) {
+            if (chain < 5 && coin(rng)) {
+                acc = makeArith(acc);
+                ++chain;
+            } else {
+                memref::StoreOp::create(rewriter, loc, acc, memref, ValueRange{zeroIdx});
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    bool tryInsertComparison(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        // Collect integer-typed results defined inside thread regions
+        // (omp.section / omp.parallel). Comparing a value with itself (x == x)
+        // is well-defined for any integer, so no UB regardless of the value.
+        SmallVector<Value> candidates;
+        op.getBody().walk([&](Operation *innerOp) {
+            if (!isOpInThread(innerOp) ||
+                innerOp->hasTrait<OpTrait::IsTerminator>())
+                return;
+            for (Value res : innerOp->getResults())
+                if (res.getType().isIntOrIndex()) {
+                    candidates.push_back(res);
+                    return;
+                }
+        });
+
+        if (candidates.empty())
+            return false;
+
+        // pick a random available result
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        Value value = candidates[dist(rng)];
+
+        // insert 1-4 comparisons right after the defining op so the result is
+        // in scope and the comparison runs in the same thread
+        int numComparisons = std::uniform_int_distribution<int>(1, 4)(rng);
+        rewriter.setInsertionPointAfter(value.getDefiningOp());
+
+        Location loc = op.getLoc();
+        for (int i = 0; i < numComparisons; ++i)
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                  value, value);
 
         return true;
     }

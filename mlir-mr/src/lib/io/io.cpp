@@ -1,9 +1,9 @@
 #include "mlir-mr/io/io.h"
 
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <algorithm>
+#include <cstdio>
+#include <cmath>
 
 namespace mlir_mr {
 
@@ -23,148 +23,352 @@ std::string dumpLLVM(llvm::Module &module) {
     return buf;
 }
 
-std::string formatRunInfo(const RunInfo &info) {
-    std::string buf;
-    llvm::raw_string_ostream os(buf);
-    os << "run: " << info.runNumber << "\n";
-    os << "seed: " << info.seed << "\n";
-    os << "file: " << info.file << "\n";
-    os << "requested-transforms: ";
-    if (info.requestedTransforms.empty())
-        os << "all\n";
-    else
-        os << llvm::join(info.requestedTransforms, ",") << "\n";
-    if (info.transformApplied)
-        for (const auto &at : info.appliedTransforms)
-            os << "applied-transformation: " << at.name
-               << " in function '" << at.targetFunction << "'\n";
-    else
-        os << "applied-transformation: none\n";
-    for (const auto &tg : info.threadResults)
-        os << "threads: " << tg.numThreads
-           << " ok: " << (tg.comparison.ok ? "yes" : "no")
-           << " warn: " << (tg.comparison.warn ? "yes" : "no")
-           << " " << tg.comparison.message << "\n";
-    if (!info.error.empty())
-        os << "error: " << info.error << "\n";
-    if (!info.warn.empty())
-        os << "warn: " << info.warn << "\n";
-    return buf;
+JsonValue jsonNull() {
+    JsonValue v;
+    return v;
 }
 
-llvm::json::Object fisherResultToJson(const FisherResult &fr) {
-    llvm::json::Object vobj;
-    vobj["p_value"] = fr.pValue;
-    vobj["p_low"] = fr.pLow;
-    vobj["p_high"] = fr.pHigh;
-    vobj["simulations"] = static_cast<int64_t>(fr.simulations);
-    llvm::json::Array cats, srcC, trC, novel, dis;
-    for (size_t i = 0; i < fr.categories.size(); ++i) {
-        cats.push_back(llvm::json::Value(fr.categories[i]));
-        srcC.push_back(llvm::json::Value(static_cast<int64_t>(fr.sourceCounts[i])));
-        trC.push_back(llvm::json::Value(static_cast<int64_t>(fr.transformedCounts[i])));
+JsonValue jsonBool(bool b) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Bool;
+    v.boolVal = b;
+    return v;
+}
+
+JsonValue jsonInt(int64_t i) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Int;
+    v.intVal = i;
+    return v;
+}
+
+JsonValue jsonDouble(double d) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Double;
+    v.doubleVal = d;
+    return v;
+}
+
+JsonValue jsonString(std::string s) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::String;
+    v.strVal = std::move(s);
+    return v;
+}
+
+JsonValue jsonArray() {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Array;
+    return v;
+}
+
+void jsonPush(JsonValue &arr, JsonValue v) {
+    arr.array.push_back(std::move(v));
+}
+
+JsonValue jsonObject() {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Object;
+    return v;
+}
+
+void jsonPut(JsonValue &obj, std::string key, JsonValue v) {
+    obj.object.emplace_back(std::move(key), std::move(v));
+}
+
+namespace {
+
+void printValue(const JsonValue &val, llvm::raw_ostream &os, int indent) {
+    std::string pad(indent * 2, ' ');
+    switch (val.kind) {
+    case JsonValue::Kind::Null:
+        os << "null";
+        break;
+    case JsonValue::Kind::Bool:
+        os << (val.boolVal ? "true" : "false");
+        break;
+    case JsonValue::Kind::Int:
+        os << val.intVal;
+        break;
+    case JsonValue::Kind::Double: {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.6g", val.doubleVal);
+        os << buf;
+        break;
     }
-    for (auto v : fr.novelOutcomes)
-        novel.push_back(llvm::json::Value(v));
-    for (auto v : fr.disappearedOutcomes)
-        dis.push_back(llvm::json::Value(v));
-    vobj["categories"] = std::move(cats);
-    vobj["source_counts"] = std::move(srcC);
-    vobj["transformed_counts"] = std::move(trC);
-    vobj["novel_outcomes"] = std::move(novel);
-    vobj["disappeared_outcomes"] = std::move(dis);
-    return vobj;
+    case JsonValue::Kind::String: {
+        os << '"';
+        for (char c : val.strVal) {
+            switch (c) {
+            case '"':
+                os << "\\\"";
+                break;
+            case '\\':
+                os << "\\\\";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    os << buf;
+                } else {
+                    os << c;
+                }
+            }
+        }
+        os << '"';
+        break;
+    }
+    case JsonValue::Kind::Array: {
+        if (val.array.empty()) {
+            os << "[]";
+            break;
+        }
+        bool compact = true;
+        for (const auto &v : val.array)
+            if (v.kind == JsonValue::Kind::Array ||
+                v.kind == JsonValue::Kind::Object) {
+                compact = false;
+                break;
+            }
+        if (compact) {
+            os << "[";
+            for (size_t i = 0; i < val.array.size(); ++i) {
+                if (i > 0)
+                    os << ", ";
+                printValue(val.array[i], os, indent);
+            }
+            os << "]";
+        } else {
+            os << "[\n";
+            for (size_t i = 0; i < val.array.size(); ++i) {
+                if (i > 0)
+                    os << ",\n";
+                os << pad << "  ";
+                printValue(val.array[i], os, indent + 1);
+            }
+            os << "\n" << pad << "]";
+        }
+        break;
+    }
+    case JsonValue::Kind::Object: {
+        if (val.object.empty()) {
+            os << "{}";
+            break;
+        }
+        os << "{\n";
+        for (size_t i = 0; i < val.object.size(); ++i) {
+            if (i > 0)
+                os << ",\n";
+            os << pad << "  \"" << val.object[i].first << "\": ";
+            printValue(val.object[i].second, os, indent + 1);
+        }
+        os << "\n" << pad << "}";
+        break;
+    }
+    }
 }
 
-bool fisherResultFromJson(const llvm::json::Object &o, FisherResult &fr) {
-    auto p = o.getNumber("p_value");
-    if (!p)
+} // namespace
+
+void printJson(const JsonValue &val, llvm::raw_ostream &os) {
+    printValue(val, os, 0);
+}
+
+JsonValue jointOutcomeToJson(const JointOutcome &o) {
+    JsonValue arr = jsonArray();
+    for (int64_t v : o)
+        jsonPush(arr, jsonInt(v));
+    return arr;
+}
+
+JsonValue outcomeListToJson(const std::vector<JointOutcome> &outcomes,
+                            const std::vector<int64_t> &counts) {
+    JsonValue arr = jsonArray();
+    for (size_t i = 0; i < outcomes.size(); ++i) {
+        JsonValue entry = jsonObject();
+        jsonPut(entry, "outcome", jointOutcomeToJson(outcomes[i]));
+        jsonPut(entry, "count",
+                jsonInt(i < counts.size() ? counts[i] : 1));
+        jsonPush(arr, std::move(entry));
+    }
+    return arr;
+}
+
+JsonValue outcomeSetResultToJson(const OutcomeSetResult &result) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "source_outcomes",
+            outcomeListToJson(result.source.outcomes, result.source.counts));
+    jsonPut(obj, "transformed_outcomes",
+            outcomeListToJson(result.transformed.outcomes,
+                              result.transformed.counts));
+    return obj;
+}
+
+bool outcomeSetResultFromJson(const llvm::json::Object &o,
+                              OutcomeSetResult &result) {
+    auto parseOutcomes = [](const llvm::json::Array *arr,
+                            std::vector<JointOutcome> &out,
+                            std::vector<int64_t> &counts) {
+        if (!arr)
+            return false;
+        for (const auto &cv : *arr) {
+            int64_t count = 1;
+            const llvm::json::Array *va = nullptr;
+            if (const auto *obj = cv.getAsObject()) {
+                va = obj->getArray("outcome");
+                if (auto c = obj->getInteger("count"))
+                    count = *c;
+            } else {
+                va = cv.getAsArray();
+            }
+            if (!va)
+                return false;
+            JointOutcome jo;
+            for (const auto &ev : *va)
+                if (auto v = ev.getAsInteger())
+                    jo.push_back(static_cast<int64_t>(*v));
+            out.push_back(std::move(jo));
+            counts.push_back(count);
+        }
+        return true;
+    };
+    if (!parseOutcomes(o.getArray("source_outcomes"), result.source.outcomes,
+                       result.source.counts))
         return false;
-    fr.pValue = *p;
-    if (auto pl = o.getNumber("p_low"))
-        fr.pLow = *pl;
-    if (auto ph = o.getNumber("p_high"))
-        fr.pHigh = *ph;
-    if (auto s = o.getInteger("simulations"))
-        fr.simulations = static_cast<int>(*s);
-    if (const auto *cats = o.getArray("categories"))
-        for (const auto &cv : *cats)
-            if (auto v = cv.getAsInteger())
-                fr.categories.push_back(static_cast<int64_t>(*v));
-    if (const auto *sc = o.getArray("source_counts"))
-        for (const auto &cv : *sc)
-            if (auto v = cv.getAsInteger())
-                fr.sourceCounts.push_back(static_cast<int>(*v));
-    if (const auto *tc = o.getArray("transformed_counts"))
-        for (const auto &cv : *tc)
-            if (auto v = cv.getAsInteger())
-                fr.transformedCounts.push_back(static_cast<int>(*v));
-    if (const auto *nov = o.getArray("novel_outcomes"))
-        for (const auto &cv : *nov)
-            if (auto v = cv.getAsInteger())
-                fr.novelOutcomes.push_back(static_cast<int64_t>(*v));
-    if (const auto *dis = o.getArray("disappeared_outcomes"))
-        for (const auto &cv : *dis)
-            if (auto v = cv.getAsInteger())
-                fr.disappearedOutcomes.push_back(static_cast<int64_t>(*v));
+    if (!parseOutcomes(o.getArray("transformed_outcomes"),
+                       result.transformed.outcomes,
+                       result.transformed.counts))
+        return false;
     return true;
 }
 
-llvm::json::Object runInfoToJson(const RunInfo &info, bool includeMLIR) {
-    llvm::json::Object obj;
-    obj["run"] = info.runNumber;
-    obj["seed"] = info.seed;
-    obj["file"] = info.file;
-    llvm::json::Array requested;
+namespace {
+
+JsonValue requestedTransformsToJson(const RunInfo &info) {
+    JsonValue arr = jsonArray();
     if (info.requestedTransforms.empty())
-        requested.push_back("all");
+        jsonPush(arr, jsonString("all"));
     else
         for (const auto &r : info.requestedTransforms)
-            requested.push_back(r);
-    obj["requested_transforms"] = std::move(requested);
-    llvm::json::Array applied;
-    for (const auto &at : info.appliedTransforms) {
-        llvm::json::Object entry;
-        entry["name"] = at.name;
-        entry["target_function"] = at.targetFunction;
-        applied.push_back(std::move(entry));
+            jsonPush(arr, jsonString(r));
+    return arr;
+}
+
+JsonValue appliedTransformsToJson(
+    const std::vector<AppliedTransformation> &applied) {
+    JsonValue arr = jsonArray();
+    for (const auto &at : applied) {
+        JsonValue entry = jsonObject();
+        jsonPut(entry, "name", jsonString(at.name));
+        jsonPut(entry, "target_function", jsonString(at.targetFunction));
+        jsonPush(arr, std::move(entry));
     }
-    obj["applied_transforms"] = std::move(applied);
-    obj["transform_applied"] = info.transformApplied;
-    llvm::json::Array threadResults;
-    int originalRuns = 0, transformedRuns = 0;
-    for (const auto &tg : info.threadResults) {
-        llvm::json::Object entry;
-        entry["threads"] = tg.numThreads;
-        entry["ok"] = tg.comparison.ok;
-        entry["warn"] = tg.comparison.warn;
-        entry["message"] = tg.comparison.message;
-        entry["original_runs"] = tg.originalRuns;
-        entry["transformed_runs"] = tg.transformedRuns;
-        if (!tg.variables.empty()) {
-            double worstP = 1.0;
-            llvm::json::Array vars;
-            for (const auto &fr : tg.variables) {
-                vars.push_back(fisherResultToJson(fr));
-                worstP = std::min(worstP, fr.pValue);
-            }
-            entry["p_value"] = worstP;
-            entry["variables"] = std::move(vars);
-        }
-        threadResults.push_back(std::move(entry));
-        originalRuns = tg.originalRuns;
-        transformedRuns = tg.transformedRuns;
-    }
-    obj["thread_results"] = std::move(threadResults);
-    obj["original_runs"] = originalRuns;
-    obj["transformed_runs"] = transformedRuns;
+    return arr;
+}
+
+JsonValue threadResultToJson(const ThreadGroupResult &tg) {
+    JsonValue entry = jsonObject();
+    jsonPut(entry, "threads", jsonInt(tg.numThreads));
+    jsonPut(entry, "status", jsonString(tg.status));
+    jsonPut(entry, "source_runs", jsonInt(tg.originalRuns));
+    jsonPut(entry, "transformed_runs", jsonInt(tg.transformedRuns));
+    jsonPut(entry, "outcome_set", outcomeSetResultToJson(tg.outcomeSet));
+    return entry;
+}
+
+// short category of the first non-OK thread, or the pipeline error itself
+std::string runMessage(const RunInfo &info) {
+    for (const auto &tg : info.threadResults)
+        if (tg.status != "OK")
+            return tg.message;
+    return info.error;
+}
+
+} // namespace
+
+JsonValue runInfoToJson(const RunInfo &info) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "run", jsonInt(info.runNumber));
+    jsonPut(obj, "file", jsonString(info.file));
+    jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
+
+    std::string status = runStatusString(info);
+    jsonPut(obj, "status", jsonString(status));
+
+    std::string message = runMessage(info);
+    if (!message.empty())
+        jsonPut(obj, "message", jsonString(message));
+
+    jsonPut(obj, "seed", jsonInt(info.seed));
+    jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
+    return obj;
+}
+
+std::string runStatusString(const RunInfo &info) {
     if (!info.error.empty())
-        obj["error"] = info.error;
-    if (!info.warn.empty())
-        obj["warn"] = info.warn;
-    if (includeMLIR)
-        obj["mlir_output"] = info.mlirOutput;
+        return "ERROR";
+    for (const auto &tg : info.threadResults)
+        if (tg.status == "ERROR")
+            return "ERROR";
+    for (const auto &tg : info.threadResults)
+        if (tg.status == "WARN")
+            return "WARN";
+    return "OK";
+}
+
+JsonValue runInfoToStatusJson(const RunInfo &info) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "run", jsonInt(info.runNumber));
+    jsonPut(obj, "file", jsonString(info.file));
+    jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
+
+    std::string status = runStatusString(info);
+    jsonPut(obj, "status", jsonString(status));
+
+    std::string message = runMessage(info);
+    if (!message.empty())
+        jsonPut(obj, "message", jsonString(message));
+
+    jsonPut(obj, "seed", jsonInt(info.seed));
+    jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
+
+    if (status != "OK") {
+        JsonValue threads = jsonArray();
+        for (const auto &tg : info.threadResults)
+            jsonPush(threads, threadResultToJson(tg));
+        jsonPut(obj, "thread_results", std::move(threads));
+    }
+    return obj;
+}
+
+JsonValue executionRunToJson(const ExecutionRunResult &run) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "run", jsonInt(run.runNumber));
+    jsonPut(obj, "file", jsonString(run.file));
+    jsonPut(obj, "seed", jsonInt(run.seed));
+    JsonValue threadResults = jsonArray();
+    for (const auto &tr : run.threadResults) {
+        JsonValue entry = jsonObject();
+        jsonPut(entry, "threads", jsonInt(tr.numThreads));
+        jsonPut(entry, "runs", jsonInt(tr.runs));
+        jsonPut(entry, "outcomes", outcomeListToJson(tr.outcomes, tr.counts));
+        jsonPush(threadResults, std::move(entry));
+    }
+    jsonPut(obj, "thread_results", std::move(threadResults));
+    if (!run.error.empty())
+        jsonPut(obj, "error", jsonString(run.error));
     return obj;
 }
 
 } // namespace mlir_mr
+

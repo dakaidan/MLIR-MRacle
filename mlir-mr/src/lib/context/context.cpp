@@ -11,6 +11,16 @@
 
 namespace mlir_mr {
 
+void initializeMLIRContext(mlir::MLIRContext &ctx) {
+    mlir::registerBuiltinDialectTranslation(ctx);
+    mlir::registerLLVMDialectTranslation(ctx);
+
+    mlir::DialectRegistry registry;
+    mlir::registerAllDialects(registry);
+    mlir::registerOpenMPDialectTranslation(registry);
+    ctx.appendDialectRegistry(registry);
+}
+
 MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform,
                      int maxApply)
     : pm(&mlirContext, mlir::ModuleOp::getOperationName()) {
@@ -18,13 +28,7 @@ MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform,
     runInfo.runNumber = runNumber;
     pm.addPass(::mlir::createMetamorphicMemoryModelPass(seed, &runInfo, transform,
                                                        maxApply));
-    mlir::registerBuiltinDialectTranslation(mlirContext);
-    mlir::registerLLVMDialectTranslation(mlirContext);
-
-    mlir::DialectRegistry registry;
-    mlir::registerAllDialects(registry);
-    mlir::registerOpenMPDialectTranslation(registry);
-    mlirContext.appendDialectRegistry(registry);
+    initializeMLIRContext(mlirContext);
 }
 
 } // namespace mlir_mr

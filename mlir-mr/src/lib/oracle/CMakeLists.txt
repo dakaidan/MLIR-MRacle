@@ -10,8 +10,10 @@ target_include_directories(mlir_mr_oracle PUBLIC
 )
 
 find_package(Threads REQUIRED)
+find_package(OpenMP REQUIRED)
 
 target_link_libraries(mlir_mr_oracle PUBLIC
     Threads::Threads
+    OpenMP::OpenMP_CXX
     mlir_mr_context
 )

@@ -78,3 +78,6 @@ llvm-project/build/
 llvm-project/**/build/
 llvm-project/install/
 .vscode/
+results/
+corpus/
+cache/
