@@ -8,6 +8,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
@@ -15,6 +16,7 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -24,6 +26,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <cmath>
 
 namespace mlir_mr {
 
@@ -33,17 +36,13 @@ static std::string gCheckpointPath;
 
 // per-thread-level progress of one run
 struct ThreadCheckpoint {
-    std::string status = "pending"; // pending | running | done
-    int srcRuns = 0;                // executions reflected in srcCounts
-    int trRuns = 0;
-    OutcomeCounts srcCounts;
-    OutcomeCounts trCounts;
+    std::string status = "pending"; // pending | done
     bool ok = true;                 // final verdict for done levels
     bool warn = false;
     std::string message;
     int originalRuns = 0;           // final run counts for done levels
     int transformedRuns = 0;
-    std::vector<FisherResult> variables;
+    OutcomeSetResult outcomeSet;
 };
 
 // progress of one metamorphic run, keyed by "run<i>_seed<s>" in the
@@ -62,61 +61,28 @@ struct RunCheckpoint {
 
 static std::map<std::string, RunCheckpoint> gCheckpoints;
 
+// deletes the campaign checkpoint once the pipeline finishes, so a completed
+// campaign never leaves a resumable state behind
+struct CheckpointCleanup {
+    ~CheckpointCleanup() {
+        std::error_code ec;
+        std::filesystem::remove(gCheckpointPath, ec);
+        std::filesystem::remove(gCheckpointPath + ".tmp", ec);
+    }
+};
+
 // --- checkpoint persistence -------------------------------------------------
 
-static llvm::json::Array countsToJson(const OutcomeCounts &counts) {
-    llvm::json::Array arr;
-    for (const auto &m : counts) {
-        llvm::json::Array col;
-        for (const auto &[val, c] : m) {
-            llvm::json::Array pair;
-            pair.push_back(llvm::json::Value(val));
-            pair.push_back(llvm::json::Value(static_cast<int64_t>(c)));
-            col.push_back(std::move(pair));
-        }
-        arr.push_back(std::move(col));
-    }
-    return arr;
-}
-
-static OutcomeCounts countsFromJson(const llvm::json::Array *arr) {
-    OutcomeCounts counts;
-    if (!arr)
-        return counts;
-    counts.reserve(arr->size());
-    for (const auto &colVal : *arr) {
-        std::map<int64_t, int> m;
-        if (const auto *col = colVal.getAsArray())
-            for (const auto &pairVal : *col)
-                if (const auto *pair = pairVal.getAsArray();
-                    pair && pair->size() == 2)
-                    if (auto v = (*pair)[0].getAsInteger())
-                        if (auto c = (*pair)[1].getAsInteger())
-                            m[static_cast<int64_t>(*v)] =
-                                static_cast<int>(*c);
-        counts.push_back(std::move(m));
-    }
-    return counts;
-}
-
-static llvm::json::Object threadToJson(const ThreadCheckpoint &tc) {
-    llvm::json::Object o;
-    o["status"] = tc.status;
-    o["src_runs"] = static_cast<int64_t>(tc.srcRuns);
-    o["tr_runs"] = static_cast<int64_t>(tc.trRuns);
-    if (tc.status == "running") {
-        o["src_counts"] = countsToJson(tc.srcCounts);
-        o["tr_counts"] = countsToJson(tc.trCounts);
-    } else if (tc.status == "done") {
-        o["ok"] = tc.ok;
-        o["warn"] = tc.warn;
-        o["message"] = tc.message;
-        o["original_runs"] = static_cast<int64_t>(tc.originalRuns);
-        o["transformed_runs"] = static_cast<int64_t>(tc.transformedRuns);
-        llvm::json::Array vars;
-        for (const auto &fr : tc.variables)
-            vars.push_back(fisherResultToJson(fr));
-        o["variables"] = std::move(vars);
+static JsonValue threadToJson(const ThreadCheckpoint &tc) {
+    JsonValue o = jsonObject();
+    jsonPut(o, "status", jsonString(tc.status));
+    if (tc.status == "done") {
+        jsonPut(o, "ok", jsonBool(tc.ok));
+        jsonPut(o, "warn", jsonBool(tc.warn));
+        jsonPut(o, "message", jsonString(tc.message));
+        jsonPut(o, "original_runs", jsonInt(tc.originalRuns));
+        jsonPut(o, "transformed_runs", jsonInt(tc.transformedRuns));
+        jsonPut(o, "outcome_set", outcomeSetResultToJson(tc.outcomeSet));
     }
     return o;
 }
@@ -126,14 +92,7 @@ static void threadFromJson(const llvm::json::Object *o, ThreadCheckpoint &tc) {
         return;
     if (auto s = o->getString("status"))
         tc.status = s->str();
-    if (auto s = o->getInteger("src_runs"))
-        tc.srcRuns = static_cast<int>(*s);
-    if (auto s = o->getInteger("tr_runs"))
-        tc.trRuns = static_cast<int>(*s);
-    if (tc.status == "running") {
-        tc.srcCounts = countsFromJson(o->getArray("src_counts"));
-        tc.trCounts = countsFromJson(o->getArray("tr_counts"));
-    } else if (tc.status == "done") {
+    if (tc.status == "done") {
         if (auto b = o->getBoolean("ok"))
             tc.ok = *b;
         if (auto b = o->getBoolean("warn"))
@@ -144,52 +103,55 @@ static void threadFromJson(const llvm::json::Object *o, ThreadCheckpoint &tc) {
             tc.originalRuns = static_cast<int>(*s);
         if (auto s = o->getInteger("transformed_runs"))
             tc.transformedRuns = static_cast<int>(*s);
-        if (const auto *vars = o->getArray("variables"))
-            for (const auto &vv : *vars)
-                if (const auto *vo = vv.getAsObject()) {
-                    FisherResult fr;
-                    if (fisherResultFromJson(*vo, fr))
-                        tc.variables.push_back(std::move(fr));
-                }
+        if (const auto *os = o->getObject("outcome_set")) {
+            OutcomeSetResult result;
+            if (outcomeSetResultFromJson(*os, result)) {
+                result.source.totalRuns = tc.originalRuns;
+                result.transformed.totalRuns = tc.transformedRuns;
+                tc.outcomeSet = std::move(result);
+            }
+        }
     }
 }
 
 static void saveCheckpoints() {
-    llvm::json::Object root;
-    llvm::json::Object runs;
+    JsonValue root = jsonObject();
+    jsonPut(root, "oracle_version", jsonInt(5));
+    JsonValue runs = jsonObject();
     for (const auto &[key, rc] : gCheckpoints) {
-        llvm::json::Object r;
-        r["file"] = rc.file;
-        r["seed"] = static_cast<int64_t>(rc.seed);
-        r["transform_applied"] = rc.transformApplied;
-        r["error"] = rc.error;
-        r["warn"] = rc.warn;
-        llvm::json::Array requested;
+        JsonValue r = jsonObject();
+        jsonPut(r, "file", jsonString(rc.file));
+        jsonPut(r, "seed", jsonInt(rc.seed));
+        jsonPut(r, "transform_applied", jsonBool(rc.transformApplied));
+        jsonPut(r, "error", jsonString(rc.error));
+        jsonPut(r, "warn", jsonString(rc.warn));
+        JsonValue requested = jsonArray();
         for (const auto &t : rc.requestedTransforms)
-            requested.push_back(t);
-        r["requested_transforms"] = std::move(requested);
-        llvm::json::Array applied;
+            jsonPush(requested, jsonString(t));
+        jsonPut(r, "requested_transforms", std::move(requested));
+        JsonValue applied = jsonArray();
         for (size_t i = 0; i < rc.appliedTransformNames.size(); ++i) {
-            llvm::json::Object a;
-            a["name"] = rc.appliedTransformNames[i];
-            a["target_function"] =
-                i < rc.appliedTransformTargets.size()
-                    ? rc.appliedTransformTargets[i]
-                    : std::string();
-            applied.push_back(std::move(a));
+            JsonValue a = jsonObject();
+            jsonPut(a, "name", jsonString(rc.appliedTransformNames[i]));
+            jsonPut(a, "target_function",
+                    jsonString(i < rc.appliedTransformTargets.size()
+                                   ? rc.appliedTransformTargets[i]
+                                   : std::string()));
+            jsonPush(applied, std::move(a));
         }
-        r["applied_transforms"] = std::move(applied);
-        llvm::json::Object threads;
+        jsonPut(r, "applied_transforms", std::move(applied));
+        JsonValue threads = jsonObject();
         for (const auto &[t, tc] : rc.threads)
-            threads[std::to_string(t)] = threadToJson(tc);
-        r["threads"] = std::move(threads);
-        runs[key] = std::move(r);
+            jsonPut(threads, std::to_string(t), threadToJson(tc));
+        jsonPut(r, "threads", std::move(threads));
+        jsonPut(runs, key, std::move(r));
     }
-    root["runs"] = std::move(runs);
+    jsonPut(root, "runs", std::move(runs));
 
     std::string buf;
     llvm::raw_string_ostream os(buf);
-    os << llvm::json::Value(std::move(root)) << "\n";
+    printJson(root, os);
+    os << "\n";
     os.flush();
 
     std::string tmp = gCheckpointPath + ".tmp";
@@ -211,7 +173,14 @@ static void loadCheckpoints() {
     if (!parsed)
         return;
     const auto *root = parsed->getAsObject();
-    const auto *runs = root ? root->getObject("runs") : nullptr;
+    if (!root)
+        return;
+    // checkpoint schema is coupled to the oracle version; a mismatch means
+    // the file predates the current result format and is discarded
+    if (auto v = root->getInteger("oracle_version"); !v ||
+                 *v != kResultSchemaVersion)
+        return;
+    const auto *runs = root->getObject("runs");
     if (!runs)
         return;
     for (const auto &kv : *runs) {
@@ -260,38 +229,36 @@ static bool allThreadsDone(const RunCheckpoint &rc) {
     return true;
 }
 
-// Lazily creates the per-campaign log folder and returns its path.
-static const std::string &ensureCampaignDir() {
-    std::error_code ec;
-    std::filesystem::create_directories(gCampaignDir, ec);
-    return gCampaignDir;
+// maps an oracle verdict onto the thread-level status string
+static std::string statusFromVerdict(bool ok, bool warn) {
+    if (!ok)
+        return "ERROR";
+    return warn ? "WARN" : "OK";
 }
 
-// Writes the artifacts of a run to logs
-static void saveRunArtifacts(const RunInfo &info,
-                             const std::string &transformedMLIR,
-                             const std::string &loweredMLIR,
-                             const std::string &jitLLVM) {
-    if (transformedMLIR.empty() && loweredMLIR.empty() && jitLLVM.empty())
-        return;
+static ThreadGroupResult threadResultFromCheckpoint(
+    int t, const ThreadCheckpoint &tc) {
+    ThreadGroupResult tg;
+    tg.numThreads = t;
+    tg.status = statusFromVerdict(tc.ok, tc.warn);
+    tg.message = tc.message;
+    tg.originalRuns = tc.originalRuns;
+    tg.transformedRuns = tc.transformedRuns;
+    tg.outcomeSet = tc.outcomeSet;
+    return tg;
+}
 
-    std::filesystem::path dir =
-        std::filesystem::path(ensureCampaignDir()) /
-        ("run" + std::to_string(info.runNumber) + "_seed" +
-         std::to_string(info.seed));
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-
-    auto writeIfNonEmpty = [&](const std::string &name,
-                               const std::string &content) {
-        if (content.empty())
-            return;
-        std::ofstream os((dir / name).string());
-        os << content;
-    };
-    writeIfNonEmpty("transformed.mlir", transformedMLIR);
-    writeIfNonEmpty("lowered.mlir", loweredMLIR);
-    writeIfNonEmpty("jit.ll", jitLLVM);
+static ThreadGroupResult threadResultFromCompare(
+    int t, const CompareResult &cmp, int srcRuns, int trRuns,
+    OutcomeSetResult outcomeSet) {
+    ThreadGroupResult tg;
+    tg.numThreads = t;
+    tg.status = statusFromVerdict(cmp.ok, cmp.warn);
+    tg.message = cmp.message;
+    tg.originalRuns = srcRuns;
+    tg.transformedRuns = trRuns;
+    tg.outcomeSet = std::move(outcomeSet);
+    return tg;
 }
 
 // helper function for multi mode, collects all .mlir files in the given folder
@@ -303,7 +270,143 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
         if (entry.is_regular_file() && entry.path().extension() == ".mlir")
             files.push_back(entry.path().string());
     }
+    std::sort(files.begin(), files.end());
     return files;
+}
+
+// creates (or reuses) the campaign folder used by both pipelines
+static void createCampaignDir(const PipelineOptions &opts) {
+    if (!opts.campaignDir.empty()) {
+        gCampaignDir = opts.campaignDir;
+    } else {
+        using namespace std::chrono;
+        auto millis = duration_cast<milliseconds>(
+            system_clock::now().time_since_epoch()).count();
+        gCampaignDir =
+            (std::filesystem::path("results") /
+             ("campaign_" + std::to_string(millis))).string();
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(gCampaignDir, ec);
+}
+
+// parses a source file, capturing diagnostics in error
+static bool parseModuleFile(const std::string &file, mlir::MLIRContext &ctx,
+                            mlir::OwningOpRef<mlir::ModuleOp> &module,
+                            std::string &error) {
+    mlir::ScopedDiagnosticHandler diagHandler(
+        &ctx, [&](mlir::Diagnostic &diag) {
+            if (!error.empty())
+                error += "; ";
+            error += diag.str();
+            return mlir::success();
+        });
+    error = "parse error";
+    module = mlir::parseSourceFile<mlir::ModuleOp>(file, &ctx);
+    if (!module)
+        return false;
+    error.clear();
+    return true;
+}
+
+// lowers a module to the LLVM dialect and translates it to LLVM IR,
+// capturing diagnostics in error; IR dumps are only produced when requested
+static bool lowerAndTranslate(mlir::ModuleOp module,
+                              mlir::MLIRContext &mlirCtx,
+                              llvm::LLVMContext &llvmCtx,
+                              const std::string &label,
+                              std::string *loweredMLIR, std::string *llvmIR,
+                              std::unique_ptr<llvm::Module> &llvmModule,
+                              std::string &error) {
+    mlir::ScopedDiagnosticHandler diagHandler(
+        &mlirCtx, [&](mlir::Diagnostic &diag) {
+            if (!error.empty())
+                error += "; ";
+            error += diag.str();
+            return mlir::success();
+        });
+    error = "lowering of " + label + " module to LLVM failed";
+    if (mlir::failed(mlir_mr::lowerToLLVM(module, &mlirCtx)))
+        return false;
+    error.clear();
+    if (loweredMLIR)
+        *loweredMLIR = dumpMLIR(module);
+    error = "translation of " + label + " module to LLVM IR failed";
+    llvmModule = mlir::translateModuleToLLVMIR(module, llvmCtx);
+    if (!llvmModule)
+        return false;
+    error.clear();
+    if (llvmIR)
+        *llvmIR = dumpLLVM(*llvmModule);
+    return true;
+}
+
+// process-lifetime memoisation of source baselines: the compiled source
+// binaries and the outcome sets collected from them are kept alive for the
+// whole pipeline loop, so repeated runs of the same file reuse them instead
+// of recompiling or re-executing. Nothing is written to disk, so no state
+// survives between processes.
+struct SourceMemo {
+    std::string sourceMLIR;
+    std::string sourceJitLLVM;
+    std::unique_ptr<llvm::LLVMContext> llvmCtx;
+    std::function<std::vector<int64_t>()> plain;
+    std::unique_ptr<llvm::Module> tsanModule; // consumed on first TSan compile
+    std::function<std::vector<int64_t>()> tsan;
+    std::string tsanError;
+    std::map<std::string, ObservedOutcomeSet> baselines; // key "t[:tsan]"
+};
+
+static std::map<std::string, SourceMemo> gSourceMemo; // keyed by file path
+
+// lowers and compiles the source module once, caching the plain binary (and
+// holding the module for an on-demand TSan compile) so later runs of the same
+// file skip recompilation
+static bool memoizeSource(mlir::MLIRContext &mlirCtx,
+                          mlir::ModuleOp module, const std::string &sourceMLIR,
+                          SourceMemo &memo, std::string &error) {
+    memo.tsan = nullptr;
+    memo.plain = nullptr;
+    memo.tsanModule.reset();
+    memo.baselines.clear();
+    memo.tsanError.clear();
+    memo.llvmCtx = std::make_unique<llvm::LLVMContext>();
+
+    std::unique_ptr<llvm::Module> llvmModule;
+    if (!lowerAndTranslate(module, mlirCtx, *memo.llvmCtx, "source", nullptr,
+                           &memo.sourceJitLLVM, llvmModule, error))
+        return false;
+    memo.sourceMLIR = sourceMLIR;
+    memo.tsanModule = std::move(llvmModule);
+    std::string compileError;
+    memo.plain = compileLLVMModuleToFunction(
+        llvm::CloneModule(*memo.tsanModule), &compileError, false);
+    if (!memo.plain) {
+        error = "JIT compile error (original): " + compileError;
+        return false;
+    }
+    return true;
+}
+
+// returns the TSan-instrumented source binary, compiling it on first use and
+// keeping it alive for later runs of the same file
+static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
+                                                              std::string &error) {
+    if (memo.tsan)
+        return memo.tsan;
+    if (!memo.tsanModule) {
+        error = memo.tsanError;
+        return nullptr;
+    }
+    std::string compileError;
+    memo.tsan = compileLLVMModuleToFunction(std::move(memo.tsanModule),
+                                            &compileError, true);
+    if (!memo.tsan)
+        memo.tsanError = "JIT compile error (original): " + compileError;
+    if (memo.tsan)
+        return memo.tsan;
+    error = memo.tsanError;
+    return nullptr;
 }
 
 // single run mode, returns a RunInfo struct with the results of the run.
@@ -311,95 +414,69 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
 // invocation can be resumed without discarding executed batches.
 static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
-                         int maxApply, bool printMLIR, bool log,
-                         bool verbose, int tsanPercent, RunCheckpoint &cp) {
+                         int maxApply, int tsanPercent, int reps,
+                         int retestReps, int maxSourceReps,
+                         int thresholdPct, RunCheckpoint &cp) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     setup.runInfo.file = inputFile;
 
-    std::string transformedMLIRStr, loweredMLIRStr, jitLLVMStr;
-    auto saveArtifacts = [&]() {
-        saveRunArtifacts(setup.runInfo, transformedMLIRStr,
-                         loweredMLIRStr, jitLLVMStr);
-    };
-
-    // set up a diagnostic handler to capture errors at various layers and store them in the RunInfo struct
-    mlir::ScopedDiagnosticHandler diagHandler(
-        &setup.mlirContext, [&](mlir::Diagnostic &diag) {
-            if (!setup.runInfo.error.empty())
-                setup.runInfo.error += "; ";
-            setup.runInfo.error += diag.str();
-            return mlir::success();
-        });
-
-    // attempt to parse module first, clearing the error if successful, otherwise return the RunInfo with the error
-    setup.runInfo.error = "parse error";
-    mlir::OwningOpRef<mlir::ModuleOp> originalModule =
-        mlir::parseSourceFile<mlir::ModuleOp>(inputFile, &setup.mlirContext);
-    if (!originalModule)
+    mlir::OwningOpRef<mlir::ModuleOp> originalModule;
+    if (!parseModuleFile(inputFile, setup.mlirContext, originalModule,
+                         setup.runInfo.error))
         return setup.runInfo;
-    setup.runInfo.error.clear();
+    setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
 
-    // keep a copy of the parsed module; the copy is the one transformed by the pass pipeline
+    // keep a copy of the parsed module; the copy is the one transformed by
+    // the pass pipeline
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform(
         mlir::ModuleOp(originalModule->clone()));
 
-    // similar to above but with the pass pipeline, if it fails return the RunInfo with the error, otherwise clear the error
-    setup.runInfo.error = "pass pipeline failed";
-    if (mlir::failed(setup.pm.run(*moduleToTransform)))
-        return setup.runInfo;
-    setup.runInfo.error.clear();
-
-    // snapshot the transformed MLIR before lowering overwrites the module;
-    // it is also the output used by --print-mlir
-    transformedMLIRStr = dumpMLIR(*moduleToTransform);
-    if (printMLIR)
-        setup.runInfo.mlirOutput = transformedMLIRStr;
-
-    // lower the source module to LLVM IR
-    setup.runInfo.error = "lowering of source module to LLVM failed";
-    if (mlir::failed(mlir_mr::lowerToLLVM(*originalModule, &setup.mlirContext))) {
-        saveArtifacts();
-        return setup.runInfo;
+    {
+        mlir::ScopedDiagnosticHandler diagHandler(
+            &setup.mlirContext, [&](mlir::Diagnostic &diag) {
+                if (!setup.runInfo.error.empty())
+                    setup.runInfo.error += "; ";
+                setup.runInfo.error += diag.str();
+                return mlir::success();
+            });
+        setup.runInfo.error = "pass pipeline failed";
+        if (mlir::failed(setup.pm.run(*moduleToTransform)))
+            return setup.runInfo;
+        setup.runInfo.error.clear();
     }
-    setup.runInfo.error.clear();
 
-    setup.runInfo.error = "translation of source module to LLVM IR failed";
-    std::unique_ptr<llvm::Module> originalModuleLLVM =
-        mlir::translateModuleToLLVMIR(*originalModule, setup.llvmContext);
-    if (!originalModuleLLVM) {
-        saveArtifacts();
+    // snapshot the transformed MLIR before lowering overwrites the module
+    setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
+
+    std::unique_ptr<llvm::Module> moduleToTransformLLVM;
+    if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
+                           setup.llvmContext, "transformed",
+                           &setup.runInfo.loweredMLIR, &setup.runInfo.jitLLVM,
+                           moduleToTransformLLVM, setup.runInfo.error))
         return setup.runInfo;
+
+    // snapshot the JIT-ready bitcode
+    {
+        llvm::raw_string_ostream bitcodeOs(setup.runInfo.bitcode);
+        llvm::WriteBitcodeToFile(*moduleToTransformLLVM, bitcodeOs);
     }
-    setup.runInfo.error.clear();
 
-    // lower the transformed module to LLVM IR
-    setup.runInfo.error = "lowering of transformed module to LLVM failed";
-    if (mlir::failed(mlir_mr::lowerToLLVM(*moduleToTransform, &setup.mlirContext))) {
-        saveArtifacts();
-        return setup.runInfo;
+    // reuse the source binaries kept alive for the whole pipeline; the first
+    // run of a file compiles them, later runs of the same file skip it
+    SourceMemo &memo = gSourceMemo[inputFile];
+    if (memo.sourceMLIR != setup.runInfo.sourceMLIR) {
+        if (!memoizeSource(setup.mlirContext, *originalModule,
+                           setup.runInfo.sourceMLIR, memo,
+                           setup.runInfo.error))
+            return setup.runInfo;
     }
-    setup.runInfo.error.clear();
-
-    // snapshot the lowered MLIR (LLVM dialect only)
-    loweredMLIRStr = dumpMLIR(*moduleToTransform);
-
-    setup.runInfo.error = "translation of transformed module to LLVM IR failed";
-    std::unique_ptr<llvm::Module> moduleToTransformLLVM =
-        mlir::translateModuleToLLVMIR(*moduleToTransform, setup.llvmContext);
-    if (!moduleToTransformLLVM) {
-        saveArtifacts();
-        return setup.runInfo;
-    }
-    setup.runInfo.error.clear();
-
-    // snapshot the JIT-ready LLVM IR
-    jitLLVMStr = dumpLLVM(*moduleToTransformLLVM);
+    setup.runInfo.sourceJitLLVM = memo.sourceJitLLVM;
 
     // TSan instruments memory accesses and perturbs scheduling, surfacing
-    // rare outcomes; applying it to a share of runs keeps that probing
-    // without paying the instrumentation cost on every run. The decision is
-    // made per run (seeded, so reproducible) and applies to both modules so
-    // the comparison is never between differently-instrumented code.
+    // rare outcomes; the percentage of runs instrumented is configurable
+    // (100% by default). The decision is made per run (seeded, so
+    // reproducible) and applies to both modules so the comparison is never
+    // between differently-instrumented code.
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> tsanDist(0, 99);
     bool useTsan = tsanDist(rng) < tsanPercent;
@@ -418,34 +495,22 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     std::string compileError;
 
     // the 1-thread determinism check never uses TSan; the multi-threaded
-    // comparisons use the variant chosen above. Both modules are always
-    // compiled plain so the deterministic single-thread check runs first
-    // without paying for instrumentation it does not need.
-    auto origPlain = compileLLVMModuleToFunction(
-        llvm::CloneModule(*originalModuleLLVM), &compileError, false);
-    if (!origPlain) {
-        setup.runInfo.error =
-            "JIT compile error (original): " + compileError;
-        saveArtifacts();
-        return setup.runInfo;
-    }
+    // comparisons use the variant chosen above. The transformed module is
+    // always compiled plain so the deterministic single-thread check runs
+    // first without paying for instrumentation it does not need.
     auto transfPlain = compileLLVMModuleToFunction(
         llvm::CloneModule(*moduleToTransformLLVM), &compileError, false);
     if (!transfPlain) {
         setup.runInfo.error =
             "JIT compile error (transformed): " + compileError;
-        saveArtifacts();
         return setup.runInfo;
     }
 
     std::function<std::vector<int64_t>()> origTsan, transfTsan;
     if (useTsan) {
-        origTsan = compileLLVMModuleToFunction(
-            llvm::CloneModule(*originalModuleLLVM), &compileError, true);
+        origTsan = sourceTsanBinary(memo, compileError);
         if (!origTsan) {
-            setup.runInfo.error =
-                "JIT compile error (original): " + compileError;
-            saveArtifacts();
+            setup.runInfo.error = compileError;
             return setup.runInfo;
         }
         transfTsan = compileLLVMModuleToFunction(
@@ -453,16 +518,15 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         if (!transfTsan) {
             setup.runInfo.error =
                 "JIT compile error (transformed): " + compileError;
-            saveArtifacts();
             return setup.runInfo;
         }
     }
 
-    // compare outcomes for each thread count separately. The 1-thread group
-    // is a determinism check (no concurrency means no TSan either); the
-    // multi-threaded groups run both programs in lockstep batches with a
-    // Fisher exact test per output variable, stopping early on confident
-    // pass/fail verdicts. Progress is checkpointed after every batch.
+    // compare the observed outcome sets for each thread count separately.
+    // Every tuple of return values is compared as one unit, so swapped or
+    // duplicated outputs stay distinguishable; the 1-thread group is a
+    // determinism check (no concurrency means no TSan either). Progress is
+    // checkpointed after every group.
     for (int t : kThreadCounts) {
         ThreadCheckpoint &tc = cp.threads[t];
 
@@ -470,8 +534,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         // checkpoint instead of re-executed
         if (tc.status == "done") {
             setup.runInfo.threadResults.push_back(
-                {t, {tc.ok, tc.warn, tc.message}, tc.originalRuns,
-                 tc.transformedRuns, tc.variables});
+                threadResultFromCheckpoint(t, tc));
             if (!tc.ok) {
                 setup.runInfo.error =
                     "threads=" + std::to_string(t) + ": " + tc.message;
@@ -482,69 +545,61 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
             continue;
         }
 
-        if (t == 1) {
-            OutcomeCounts origCounts =
-                executeCompiled(origPlain, kRunsSingle, 1);
-            OutcomeCounts transfCounts =
-                executeCompiled(transfPlain, kRunsSingle, 1);
-            CompareResult cmp =
-                compareSingleThread(origCounts, transfCounts, kRunsSingle);
-            setup.runInfo.threadResults.push_back(
-                {t, cmp, kRunsSingle, kRunsSingle, {}});
-            tc.status = "done";
-            tc.ok = cmp.ok;
-            tc.warn = cmp.warn;
-            tc.message = cmp.message;
-            tc.originalRuns = kRunsSingle;
-            tc.transformedRuns = kRunsSingle;
-            tc.variables.clear();
-            saveCheckpoints();
-            if (!cmp.ok) {
-                setup.runInfo.error = "threads=1: " + cmp.message;
-                break;
+        const auto &origFn =
+            t == 1 ? memo.plain : (useTsan ? origTsan : memo.plain);
+        const auto &transfFn =
+            t == 1 ? transfPlain : (useTsan ? transfTsan : transfPlain);
+
+        // the source side is served from the in-memory baseline when
+        // possible; misses run once with the full per-run budget
+        bool tsanVariant = t != 1 && useTsan;
+        int srcRuns;
+        ObservedOutcomeSet srcSet;
+        std::string baseKey =
+            std::to_string(t) + (tsanVariant ? ":tsan" : "");
+        auto baseIt = memo.baselines.find(baseKey);
+        if (baseIt != memo.baselines.end()) {
+            srcSet = baseIt->second;
+            srcRuns = srcSet.totalRuns;
+        } else {
+            srcSet = collectOutcomeSet(origFn, reps, t);
+            srcRuns = reps;
+            memo.baselines[baseKey] = srcSet;
+        }
+        ObservedOutcomeSet trSet = collectOutcomeSet(transfFn, reps, t);
+
+        // retest the source when the transformed side found outcomes that are
+        // missing from the baseline, up to a hard per-entry cap; any outcomes
+        // found are merged back into the in-memory baseline
+        if (t != 1) {
+            auto missing =
+                outcomeSetDifference(trSet.outcomes, srcSet.outcomes);
+            while (!missing.empty() && srcRuns < maxSourceReps) {
+                int extra = std::min(retestReps, maxSourceReps - srcRuns);
+                ObservedOutcomeSet extraSet =
+                    collectOutcomeSet(origFn, extra, t);
+                srcSet = mergeOutcomeSets(srcSet, extraSet);
+                srcRuns += extra;
+                memo.baselines[baseKey] = srcSet;
+                missing =
+                    outcomeSetDifference(trSet.outcomes, srcSet.outcomes);
             }
-            if (cmp.warn)
-                setup.runInfo.warn = cmp.message;
-            continue;
         }
 
-        int maxRuns = t == 2 ? kRunsPrimary : kRunsSecondary;
-        int batchSize = t == 2 ? kBatchPrimary : kBatchSecondary;
-        const auto &origFn = useTsan ? origTsan : origPlain;
-        const auto &transfFn = useTsan ? transfTsan : transfPlain;
+        OutcomeSetResult outcomeSet =
+            compareOutcomeSets(srcSet, trSet, t, thresholdPct);
+        CompareResult cmp = outcomeSet.compare;
 
-        // resume from checkpointed counts when the previous invocation was
-        // interrupted mid-level; otherwise start fresh
-        OutcomeCounts resumeSrc =
-            tc.status == "running" ? tc.srcCounts : OutcomeCounts{};
-        OutcomeCounts resumeTr =
-            tc.status == "running" ? tc.trCounts : OutcomeCounts{};
-        tc.status = "running";
-
-        SequentialResult seq = compareSequential(
-            origFn, transfFn, t, maxRuns, batchSize, resumeSrc, resumeTr,
-            [&](const OutcomeCounts &src, const OutcomeCounts &tr,
-                int srcRuns, int trRuns) {
-                tc.srcCounts = src;
-                tc.trCounts = tr;
-                tc.srcRuns = srcRuns;
-                tc.trRuns = trRuns;
-                saveCheckpoints();
-            });
-
-        CompareResult cmp = sequentialToCompareResult(seq, t, verbose);
-        setup.runInfo.threadResults.push_back(
-            {t, cmp, seq.sourceRuns, seq.transformedRuns, seq.variables});
+        setup.runInfo.threadResults.push_back(threadResultFromCompare(
+            t, cmp, srcRuns, reps, std::move(outcomeSet)));
 
         tc.status = "done";
         tc.ok = cmp.ok;
         tc.warn = cmp.warn;
         tc.message = cmp.message;
-        tc.originalRuns = seq.sourceRuns;
-        tc.transformedRuns = seq.transformedRuns;
-        tc.variables = seq.variables;
-        tc.srcCounts.clear();
-        tc.trCounts.clear();
+        tc.originalRuns = srcRuns;
+        tc.transformedRuns = reps;
+        tc.outcomeSet = std::move(outcomeSet);
         saveCheckpoints();
 
         if (!cmp.ok) {
@@ -560,11 +615,93 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     cp.warn = setup.runInfo.warn;
     saveCheckpoints();
 
-    // failures are always logged; successful runs only with --log
-    if (!setup.runInfo.error.empty() || log)
-        saveArtifacts();
-
     return setup.runInfo;
+}
+
+// straight execution mode: parse, lower, JIT and run the source program at
+// every team size without any transformation or comparison. Joint outcome
+// frequencies are recorded per thread count.
+static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
+                                        int runIdx, int reps) {
+    ExecutionRunResult result;
+    result.runNumber = runIdx;
+    result.seed = seed;
+    result.file = inputFile;
+
+    mlir::MLIRContext mlirCtx;
+    initializeMLIRContext(mlirCtx);
+
+    mlir::OwningOpRef<mlir::ModuleOp> module;
+    if (!parseModuleFile(inputFile, mlirCtx, module, result.error))
+        return result;
+    std::string sourceMLIR = dumpMLIR(*module);
+
+    // reuse the compiled source binary and baseline outcome sets kept alive
+    // for the whole pipeline; the first run of a file compiles and executes
+    // the full per-thread budget, later runs of the same file reuse it
+    SourceMemo &memo = gSourceMemo[inputFile];
+    if (memo.sourceMLIR != sourceMLIR) {
+        if (!memoizeSource(mlirCtx, *module, sourceMLIR, memo, result.error))
+            return result;
+    }
+    result.llvmIR = memo.sourceJitLLVM;
+
+    for (int t : kThreadCounts) {
+        ObservedOutcomeSet set;
+        int runs;
+        std::string baseKey = std::to_string(t);
+        
+        auto baseIt = memo.baselines.find(baseKey);
+        if (baseIt != memo.baselines.end()) {
+            set = baseIt->second;
+            runs = set.totalRuns;
+        } else {
+            set = collectOutcomeSet(memo.plain, reps, t);
+            runs = reps;
+            memo.baselines[baseKey] = set;
+        }
+
+        ExecutionThreadResult tr;
+        tr.numThreads = t;
+        tr.runs = runs;
+        tr.outcomes = std::move(set.outcomes);
+        tr.counts = std::move(set.counts);
+        result.threadResults.push_back(std::move(tr));
+    }
+    return result;
+}
+
+// core pipeline function for --run: executes each input file as-is and
+// records joint outcome frequencies per thread count. There is no
+// checkpointing or status classification.
+ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
+    ExecutionPipelineResult result;
+    result.runs.reserve(opts.numRuns);
+
+    createCampaignDir(opts);
+
+    std::vector<std::string> files;
+    if (!opts.multiFolder.empty()) {
+        files = collectMLIRFiles(opts.multiFolder);
+        if (files.empty()) {
+            ExecutionRunResult errInfo;
+            errInfo.error = "no .mlir files in " + opts.multiFolder;
+            errInfo.runNumber = opts.runNumber;
+            result.runs.push_back(std::move(errInfo));
+            result.campaignDir = gCampaignDir;
+            return result;
+        }
+    } else {
+        files.push_back(opts.inputFile);
+    }
+    for (size_t i = 0; i < files.size(); ++i) {
+        int runSeed = opts.seed >= 0 ? opts.seed : 42;
+        result.runs.push_back(executeSingle(
+            files[i], runSeed, opts.runNumber + static_cast<int>(i),
+            opts.reps));
+    }
+    result.campaignDir = gCampaignDir;
+    return result;
 }
 
 // core pipeline function, runs the metamorphic testing pipeline for the given options
@@ -575,23 +712,13 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
 
     // the campaign folder is fixed by the user for resumable campaigns or
     // timestamped otherwise; the checkpoint file lives inside it
-    gCampaignDir.clear();
     gCheckpointPath.clear();
     gCheckpoints.clear();
-    if (!opts.campaignDir.empty()) {
-        gCampaignDir = opts.campaignDir;
-    } else {
-        using namespace std::chrono;
-        auto millis = duration_cast<milliseconds>(
-            system_clock::now().time_since_epoch()).count();
-        gCampaignDir =
-            (std::filesystem::path("logs") /
-             ("campaign_" + std::to_string(millis))).string();
-    }
-    std::error_code ec;
-    std::filesystem::create_directories(gCampaignDir, ec);
+    createCampaignDir(opts);
     gCheckpointPath =
         (std::filesystem::path(gCampaignDir) / "checkpoint.json").string();
+    CheckpointCleanup cleanup;
+
     loadCheckpoints();
 
     // if multi mode is requested, collect all .mlir files in the given folder
@@ -619,21 +746,24 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
                           ? opts.seed
                           : static_cast<int>(rng() & 0x7FFFFFFF);
 
+        // per-run file RNG derived only from seed and run index, so a fixed
+        // seed picks the same file every time; a random seed stays random
+        uint32_t fileSeed = static_cast<uint32_t>(runSeed) +
+                            static_cast<uint32_t>(runIdx) * 0x9e3779b9u;
+        std::mt19937 fileRng(fileSeed);
+
         std::string inputFile;
 
-        // if multi mode, pick one at random
         if (!opts.multiFolder.empty())
-            inputFile = multiFiles[fileDist(rng)];
+            inputFile = multiFiles[fileDist(fileRng)];
         else
-            // else we can assume the input file is valid, as it was checked in main.cpp
             inputFile = opts.inputFile;
 
         // run single run and collect the RunInfo; errors and warnings are
         // carried inside the RunInfo and surfaced by the caller, not printed
-        // here, so stdout stays machine-parseable. Runs and seeds are
-        // deterministic from the options, so a run whose thread levels all
-        // completed in a previous invocation is reconstructed from the
-        // checkpoint instead of being executed again.
+        // here. Runs and seeds are deterministic from the options, so a run
+        // whose thread levels all completed in a previous invocation is
+        // reconstructed from the checkpoint instead of being executed again.
         std::string runKey = "run" + std::to_string(runIdx) + "_seed" +
                              std::to_string(runSeed);
         RunCheckpoint &cp = gCheckpoints[runKey];
@@ -655,10 +785,13 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
                      k < cp.appliedTransformTargets.size()
                          ? cp.appliedTransformTargets[k]
                          : std::string()});
-            for (const auto &[t, tc] : cp.threads)
+            for (int t : kThreadCounts) {
+                auto it = cp.threads.find(t);
+                if (it == cp.threads.end())
+                    continue;
                 info.threadResults.push_back(
-                    {t, {tc.ok, tc.warn, tc.message}, tc.originalRuns,
-                     tc.transformedRuns, tc.variables});
+                    threadResultFromCheckpoint(t, it->second));
+            }
             info.error = cp.error;
             info.warn = cp.warn;
             result.runs.push_back(std::move(info));
@@ -667,13 +800,22 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
 
         RunInfo info = runSingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
-                                 opts.printMLIR, opts.log, opts.verbose,
-                                 opts.tsanPercent, cp);
+                                 opts.tsanPercent, opts.reps,
+                                 opts.retestReps, opts.maxSourceReps,
+                                 opts.thresholdPct, cp);
 
         result.runs.push_back(std::move(info));
     }
 
+    result.campaignDir = gCampaignDir;
     return result;
+}
+
+// destroys the process-lifetime JIT state while TSan is still fully alive;
+// the static destructor for gSourceMemo would otherwise run after TSan
+// teardown begins and crash in JIT teardown
+void shutdownCore() {
+    gSourceMemo.clear();
 }
 
 } // namespace mlir_mr

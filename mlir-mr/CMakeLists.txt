@@ -1,5 +1,18 @@
 enable_language(CXX)
 
+# Apple clang does not auto-detect Homebrew's libomp; hint FindOpenMP when
+# present. Done here so both the oracle library and the app resolve the same
+# OpenMP runtime.
+if(APPLE AND NOT OpenMP_ROOT)
+    foreach(dir /opt/homebrew/opt/libomp /usr/local/opt/libomp)
+        if(EXISTS "${dir}/lib" AND EXISTS "${dir}/include/omp.h")
+            set(OpenMP_ROOT "${dir}")
+            break()
+        endif()
+    endforeach()
+endif()
+find_package(OpenMP REQUIRED)
+
 add_subdirectory(src/lib)
 add_subdirectory(src/app)
 

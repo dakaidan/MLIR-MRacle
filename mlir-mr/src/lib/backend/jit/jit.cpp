@@ -3,6 +3,7 @@
 
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/Core.h"
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -169,17 +170,22 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     // shared_ptr keeps compiled code alive as long as the returned callable is referenced.
     std::shared_ptr<llvm::orc::LLJIT> jit(jitOrErr->release());
 
-    unsigned numResults = module ? getResultCount(*module) : 0;
-    if (module) {
-        addStateResetFunction(*module);
-        addResultCaptureFunction(*module);
-        if (enableTsan && !instrumentWithTsan(*module, error))
-            return nullptr;
+    if (!module) {
+        if (error)
+            *error = "main not found";
+        return nullptr;
     }
 
-    if (auto err = jit->addIRModule(
-            llvm::orc::ThreadSafeModule(std::move(module),
-                                        std::make_unique<llvm::LLVMContext>()))) {
+    unsigned numResults = getResultCount(*module);
+    addStateResetFunction(*module);
+    addResultCaptureFunction(*module);
+    if (enableTsan && !instrumentWithTsan(*module, error))
+        return nullptr;
+
+    auto tsm = llvm::orc::cloneExternalModuleToContext(
+        *module,
+        llvm::orc::ThreadSafeContext(std::make_unique<llvm::LLVMContext>()));
+    if (auto err = jit->addIRModule(std::move(tsm))) {
         if (error)
             *error = "failed to add module: " + llvm::toString(std::move(err));
         return nullptr;
