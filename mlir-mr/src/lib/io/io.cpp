@@ -204,6 +204,51 @@ JsonValue outcomeListToJson(const std::vector<JointOutcome> &outcomes,
     return arr;
 }
 
+JsonValue observedOutcomeSetToJson(const ObservedOutcomeSet &set) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "version", jsonInt(1));
+    jsonPut(obj, "outcomes", outcomeListToJson(set.outcomes, set.counts));
+    jsonPut(obj, "arity", jsonInt(static_cast<int64_t>(set.arity)));
+    jsonPut(obj, "arity_consistent", jsonBool(set.arityConsistent));
+    jsonPut(obj, "total_runs", jsonInt(set.totalRuns));
+    return obj;
+}
+
+bool observedOutcomeSetFromJson(const llvm::json::Object &o,
+                                ObservedOutcomeSet &set) {
+    // a version mismatch means the payload predates the current format; it is
+    // treated as a cache miss rather than being silently reinterpreted
+    if (auto v = o.getInteger("version"); !v || *v != 1)
+        return false;
+    const llvm::json::Array *arr = o.getArray("outcomes");
+    if (!arr)
+        return false;
+    for (const auto &cv : *arr) {
+        const auto *obj = cv.getAsObject();
+        if (!obj)
+            return false;
+        const llvm::json::Array *va = obj->getArray("outcome");
+        if (!va)
+            return false;
+        JointOutcome jo;
+        for (const auto &ev : *va)
+            if (auto v = ev.getAsInteger())
+                jo.push_back(static_cast<int64_t>(*v));
+        set.outcomes.push_back(std::move(jo));
+        if (auto c = obj->getInteger("count"))
+            set.counts.push_back(*c);
+        else
+            set.counts.push_back(1);
+    }
+    if (auto a = o.getInteger("arity"))
+        set.arity = static_cast<size_t>(*a);
+    if (auto b = o.getBoolean("arity_consistent"))
+        set.arityConsistent = *b;
+    if (auto t = o.getInteger("total_runs"))
+        set.totalRuns = *t;
+    return true;
+}
+
 JsonValue outcomeSetResultToJson(const OutcomeSetResult &result) {
     JsonValue obj = jsonObject();
     jsonPut(obj, "source_outcomes",

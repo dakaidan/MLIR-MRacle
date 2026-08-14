@@ -44,6 +44,14 @@ void jsonPut(JsonValue &obj, std::string key, JsonValue v);
 // renders a JSON value with 2-space indentation
 void printJson(const JsonValue &val, llvm::raw_ostream &os);
 
+// serializes a single observed outcome set (baseline cache payload)
+JsonValue observedOutcomeSetToJson(const ObservedOutcomeSet &set);
+
+// parses an observed outcome set from a JSON object; returns false on
+// malformed input
+bool observedOutcomeSetFromJson(const llvm::json::Object &o,
+                                ObservedOutcomeSet &set);
+
 // renders an outcome-set comparison result as a JSON object
 JsonValue outcomeSetResultToJson(const OutcomeSetResult &result);
 

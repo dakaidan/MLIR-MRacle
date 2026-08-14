@@ -84,8 +84,10 @@ static void addStateResetFunction(llvm::Module &module) {
     builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "entry", fn));
 
     for (auto &global : module.globals()) {
-        if (global.isDeclaration() || !global.hasInitializer() ||
-            global.getName().starts_with("llvm."))
+        // constants are immutable; storing to one is rejected by the verifier
+        // and would be UB at runtime
+        if (global.isDeclaration() || global.isConstant() ||
+            !global.hasInitializer() || global.getName().starts_with("llvm."))
             continue;
         builder.CreateStore(global.getInitializer(), &global);
     }

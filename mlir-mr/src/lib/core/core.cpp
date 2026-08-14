@@ -8,9 +8,11 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 
@@ -33,6 +35,9 @@ namespace mlir_mr {
 // per-campaign log folder; the checkpoint file lives inside it
 static std::string gCampaignDir;
 static std::string gCheckpointPath;
+
+// the 1-thread group is a determinism check, so a small budget suffices
+static constexpr int kDeterminismReps = 32;
 
 // per-thread-level progress of one run
 struct ThreadCheckpoint {
@@ -274,6 +279,20 @@ static std::vector<std::string> collectMLIRFiles(const std::string &folder) {
     return files;
 }
 
+// picks a random .mlir file for a run; the per-run file RNG is derived only
+// from seed and run index, so a fixed seed picks the same file every time
+static std::string pickInputFile(const PipelineOptions &opts,
+                                 const std::vector<std::string> &multiFiles,
+                                 int runIdx, int runSeed) {
+    if (multiFiles.empty())
+        return opts.inputFile;
+    uint32_t fileSeed = static_cast<uint32_t>(runSeed) +
+                        static_cast<uint32_t>(runIdx) * 0x9e3779b9u;
+    std::mt19937 fileRng(fileSeed);
+    std::uniform_int_distribution<size_t> dist(0, multiFiles.size() - 1);
+    return multiFiles[dist(fileRng)];
+}
+
 // creates (or reuses) the campaign folder used by both pipelines
 static void createCampaignDir(const PipelineOptions &opts) {
     if (!opts.campaignDir.empty()) {
@@ -309,6 +328,34 @@ static bool parseModuleFile(const std::string &file, mlir::MLIRContext &ctx,
     return true;
 }
 
+// parses a source module, clones it, and runs the metamorphic pass pipeline
+// on the clone; used by both the full pipeline and emit mode
+static bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
+                            mlir::OwningOpRef<mlir::ModuleOp> &originalModule,
+                            mlir::OwningOpRef<mlir::ModuleOp> &transformedModule) {
+    setup.runInfo.file = inputFile;
+    if (!parseModuleFile(inputFile, setup.mlirContext, originalModule,
+                         setup.runInfo.error))
+        return false;
+    setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
+    transformedModule = mlir::OwningOpRef<mlir::ModuleOp>(
+        mlir::ModuleOp(originalModule->clone()));
+
+    mlir::ScopedDiagnosticHandler diagHandler(
+        &setup.mlirContext, [&](mlir::Diagnostic &diag) {
+            if (!setup.runInfo.error.empty())
+                setup.runInfo.error += "; ";
+            setup.runInfo.error += diag.str();
+            return mlir::success();
+        });
+    setup.runInfo.error = "pass pipeline failed";
+    if (mlir::failed(setup.pm.run(*transformedModule)))
+        return false;
+    setup.runInfo.error.clear();
+    setup.runInfo.transformedMLIR = dumpMLIR(*transformedModule);
+    return true;
+}
+
 // lowers a module to the LLVM dialect and translates it to LLVM IR,
 // capturing diagnostics in error; IR dumps are only produced when requested
 static bool lowerAndTranslate(mlir::ModuleOp module,
@@ -341,6 +388,158 @@ static bool lowerAndTranslate(mlir::ModuleOp module,
     return true;
 }
 
+// persistent on-disk cache under cache/v2; lowered LLVM modules are
+// cached as bitcode so later campaigns skip MLIR lowering and translation,
+// and source baseline outcome sets are cached as JSON so later campaigns skip
+// the initial source batch. The root is versioned so a format change in the
+// payloads or the cache keys never silently reuses stale entries.
+static std::filesystem::path cacheRoot() { return "cache/v2"; }
+
+static std::filesystem::path moduleCacheDir() {
+    return cacheRoot() / "modules";
+}
+
+static std::filesystem::path baselineCacheDir() {
+    return cacheRoot() / "baselines";
+}
+
+static std::filesystem::path moduleCachePath(const std::string &hash) {
+    return moduleCacheDir() / (hash + ".bc");
+}
+
+static std::filesystem::path loweredCachePath(const std::string &hash) {
+    return moduleCacheDir() / (hash + ".lowered.mlir");
+}
+
+static std::filesystem::path llvmIRCachePath(const std::string &hash) {
+    return moduleCacheDir() / (hash + ".ll");
+}
+
+// the baseline cache key includes the sampling budget so a campaign run with
+// a different --reps never reuses a baseline collected with another budget
+static std::filesystem::path baselineCachePath(const std::string &hash,
+                                               const std::string &variant,
+                                               int reps) {
+    return baselineCacheDir() /
+           (hash + "_r" + std::to_string(reps) + "_" + variant + ".json");
+}
+
+static void ensureCacheDirs() {
+    std::error_code ec;
+    std::filesystem::create_directories(moduleCacheDir(), ec);
+    std::filesystem::create_directories(baselineCacheDir(), ec);
+}
+
+static bool readFileContent(const std::string &path, std::string &content) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    content.assign(std::istreambuf_iterator<char>(f),
+                   std::istreambuf_iterator<char>());
+    return true;
+}
+
+static bool writeFileContent(const std::string &path,
+                             const std::string &content) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f)
+        return false;
+    f << content;
+    return true;
+}
+
+// stable 64-bit FNV-1a hash rendered as hex; cache keys only need to match
+// within a machine, not be cryptographic
+static std::string hashString(const std::string &s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    std::string hex;
+    for (int shift = 60; shift >= 0; shift -= 4)
+        hex += "0123456789abcdef"[(h >> shift) & 0xF];
+    return hex;
+}
+
+static bool loadCachedModule(const std::string &path, llvm::LLVMContext &ctx,
+                             std::unique_ptr<llvm::Module> &module,
+                             std::string &error) {
+    auto bufOrErr = llvm::MemoryBuffer::getFile(path);
+    if (!bufOrErr)
+        return false;
+    auto modOrErr = llvm::parseBitcodeFile((*bufOrErr)->getMemBufferRef(), ctx);
+    if (!modOrErr) {
+        error = llvm::toString(modOrErr.takeError());
+        return false;
+    }
+    module = std::move(*modOrErr);
+    return true;
+}
+
+static void saveCachedModule(const std::string &path, llvm::Module &module) {
+    std::error_code ec;
+    llvm::raw_fd_ostream os(path, ec);
+    if (ec)
+        return;
+    llvm::WriteBitcodeToFile(module, os);
+}
+
+// loads a cached module and its artifact sidecars for the given hash; returns
+// false when no cache entry exists
+static bool loadModuleCache(const std::string &hash, llvm::LLVMContext &ctx,
+                            std::unique_ptr<llvm::Module> &module,
+                            std::string *loweredMLIR, std::string *llvmIR,
+                            std::string *bitcode, std::string &error) {
+    if (!loadCachedModule(moduleCachePath(hash).string(), ctx, module, error))
+        return false;
+    if (loweredMLIR)
+        readFileContent(loweredCachePath(hash).string(), *loweredMLIR);
+    if (llvmIR)
+        readFileContent(llvmIRCachePath(hash).string(), *llvmIR);
+    if (bitcode)
+        readFileContent(moduleCachePath(hash).string(), *bitcode);
+    return true;
+}
+
+static void saveModuleCache(const std::string &hash, llvm::Module &module,
+                            const std::string &loweredMLIR,
+                            const std::string &llvmIR) {
+    ensureCacheDirs();
+    saveCachedModule(moduleCachePath(hash).string(), module);
+    writeFileContent(loweredCachePath(hash).string(), loweredMLIR);
+    writeFileContent(llvmIRCachePath(hash).string(), llvmIR);
+}
+
+static bool loadBaselineCache(const std::string &sourceHash,
+                              const std::string &variant, int reps,
+                              ObservedOutcomeSet &set) {
+    std::string content;
+    if (!readFileContent(baselineCachePath(sourceHash, variant, reps).string(),
+                         content))
+        return false;
+    auto parsed = llvm::json::parse(content);
+    if (!parsed)
+        return false;
+    const auto *obj = parsed->getAsObject();
+    if (!obj)
+        return false;
+    return observedOutcomeSetFromJson(*obj, set);
+}
+
+static void saveBaselineCache(const std::string &sourceHash,
+                              const std::string &variant, int reps,
+                              const ObservedOutcomeSet &set) {
+    ensureCacheDirs();
+    std::string buf;
+    llvm::raw_string_ostream os(buf);
+    printJson(observedOutcomeSetToJson(set), os);
+    os << "\n";
+    os.flush();
+    writeFileContent(baselineCachePath(sourceHash, variant, reps).string(),
+                     buf);
+}
+
 // process-lifetime memoisation of source baselines: the compiled source
 // binaries and the outcome sets collected from them are kept alive for the
 // whole pipeline loop, so repeated runs of the same file reuse them instead
@@ -348,6 +547,7 @@ static bool lowerAndTranslate(mlir::ModuleOp module,
 // survives between processes.
 struct SourceMemo {
     std::string sourceMLIR;
+    std::string sourceHash;
     std::string sourceJitLLVM;
     std::unique_ptr<llvm::LLVMContext> llvmCtx;
     std::function<std::vector<int64_t>()> plain;
@@ -359,9 +559,22 @@ struct SourceMemo {
 
 static std::map<std::string, SourceMemo> gSourceMemo; // keyed by file path
 
+// invalidates a baseline entry (memory and disk) once the per-run retest cap
+// is reached with outcomes still missing: the entry can no longer learn, so
+// the next run of this file recollects from scratch and can take in new
+// possible values
+static void clearBaseline(SourceMemo &memo, const std::string &baseKey,
+                          int reps) {
+    memo.baselines.erase(baseKey);
+    std::error_code ec;
+    std::filesystem::remove(
+        baselineCachePath(memo.sourceHash, baseKey, reps).string(), ec);
+}
+
 // lowers and compiles the source module once, caching the plain binary (and
 // holding the module for an on-demand TSan compile) so later runs of the same
-// file skip recompilation
+// file skip recompilation; the lowered bitcode is also persisted so later
+// processes of the same source skip lowering and translation entirely
 static bool memoizeSource(mlir::MLIRContext &mlirCtx,
                           mlir::ModuleOp module, const std::string &sourceMLIR,
                           SourceMemo &memo, std::string &error) {
@@ -371,12 +584,20 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
     memo.baselines.clear();
     memo.tsanError.clear();
     memo.llvmCtx = std::make_unique<llvm::LLVMContext>();
+    memo.sourceMLIR = sourceMLIR;
+    memo.sourceHash = hashString(sourceMLIR);
+    ensureCacheDirs();
 
     std::unique_ptr<llvm::Module> llvmModule;
-    if (!lowerAndTranslate(module, mlirCtx, *memo.llvmCtx, "source", nullptr,
-                           &memo.sourceJitLLVM, llvmModule, error))
-        return false;
-    memo.sourceMLIR = sourceMLIR;
+    if (!loadModuleCache(memo.sourceHash, *memo.llvmCtx, llvmModule, nullptr,
+                         &memo.sourceJitLLVM, nullptr, error)) {
+        error.clear();
+        if (!lowerAndTranslate(module, mlirCtx, *memo.llvmCtx, "source",
+                               nullptr, &memo.sourceJitLLVM, llvmModule,
+                               error))
+            return false;
+        saveModuleCache(memo.sourceHash, *llvmModule, "", memo.sourceJitLLVM);
+    }
     memo.tsanModule = std::move(llvmModule);
     std::string compileError;
     memo.plain = compileLLVMModuleToFunction(
@@ -418,57 +639,51 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                          int retestReps, int maxSourceReps,
                          int thresholdPct, RunCheckpoint &cp) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
-    setup.runInfo.file = inputFile;
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
-    if (!parseModuleFile(inputFile, setup.mlirContext, originalModule,
-                         setup.runInfo.error))
+    mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
+
+    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
         return setup.runInfo;
-    setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
-
-    // keep a copy of the parsed module; the copy is the one transformed by
-    // the pass pipeline
-    mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform(
-        mlir::ModuleOp(originalModule->clone()));
-
-    {
-        mlir::ScopedDiagnosticHandler diagHandler(
-            &setup.mlirContext, [&](mlir::Diagnostic &diag) {
-                if (!setup.runInfo.error.empty())
-                    setup.runInfo.error += "; ";
-                setup.runInfo.error += diag.str();
-                return mlir::success();
-            });
-        setup.runInfo.error = "pass pipeline failed";
-        if (mlir::failed(setup.pm.run(*moduleToTransform)))
-            return setup.runInfo;
-        setup.runInfo.error.clear();
-    }
 
     // snapshot the transformed MLIR before lowering overwrites the module
     setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
 
+    // the transformed module is cached as bitcode keyed by its MLIR text, so
+    // repeated campaigns of the same source and transforms skip lowering and
+    // translation; artifacts are restored from sidecar files
     std::unique_ptr<llvm::Module> moduleToTransformLLVM;
-    if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
-                           setup.llvmContext, "transformed",
-                           &setup.runInfo.loweredMLIR, &setup.runInfo.jitLLVM,
-                           moduleToTransformLLVM, setup.runInfo.error))
-        return setup.runInfo;
-
-    // snapshot the JIT-ready bitcode
-    {
-        llvm::raw_string_ostream bitcodeOs(setup.runInfo.bitcode);
-        llvm::WriteBitcodeToFile(*moduleToTransformLLVM, bitcodeOs);
+    std::string txHash = hashString(setup.runInfo.transformedMLIR);
+    if (!loadModuleCache(txHash, setup.llvmContext, moduleToTransformLLVM,
+                         &setup.runInfo.loweredMLIR, &setup.runInfo.jitLLVM,
+                         &setup.runInfo.bitcode, setup.runInfo.error)) {
+        setup.runInfo.error.clear();
+        if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
+                               setup.llvmContext, "transformed",
+                               &setup.runInfo.loweredMLIR,
+                               &setup.runInfo.jitLLVM, moduleToTransformLLVM,
+                               setup.runInfo.error))
+            return setup.runInfo;
+        {
+            llvm::raw_string_ostream bitcodeOs(setup.runInfo.bitcode);
+            llvm::WriteBitcodeToFile(*moduleToTransformLLVM, bitcodeOs);
+        }
+        saveModuleCache(txHash, *moduleToTransformLLVM,
+                        setup.runInfo.loweredMLIR, setup.runInfo.jitLLVM);
     }
 
     // reuse the source binaries kept alive for the whole pipeline; the first
-    // run of a file compiles them, later runs of the same file skip it
+    // run of a file compiles them, later runs of the same file skip it. A new
+    // memo is built off to the side and only installed on success, so a
+    // failed recompile leaves the previous binaries intact.
     SourceMemo &memo = gSourceMemo[inputFile];
     if (memo.sourceMLIR != setup.runInfo.sourceMLIR) {
+        SourceMemo fresh;
         if (!memoizeSource(setup.mlirContext, *originalModule,
-                           setup.runInfo.sourceMLIR, memo,
+                           setup.runInfo.sourceMLIR, fresh,
                            setup.runInfo.error))
             return setup.runInfo;
+        memo = std::move(fresh);
     }
     setup.runInfo.sourceJitLLVM = memo.sourceJitLLVM;
 
@@ -526,7 +741,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // Every tuple of return values is compared as one unit, so swapped or
     // duplicated outputs stay distinguishable; the 1-thread group is a
     // determinism check (no concurrency means no TSan either). Progress is
-    // checkpointed after every group.
+    // checkpointed once per run.
     for (int t : kThreadCounts) {
         ThreadCheckpoint &tc = cp.threads[t];
 
@@ -545,28 +760,45 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
             continue;
         }
 
+        // the 1-thread level only needs to confirm a single deterministic
+        // outcome, so it runs on a much smaller budget than the sweep levels
+        int sweepReps = (t == 1) ? kDeterminismReps : reps;
+
         const auto &origFn =
             t == 1 ? memo.plain : (useTsan ? origTsan : memo.plain);
         const auto &transfFn =
             t == 1 ? transfPlain : (useTsan ? transfTsan : transfPlain);
 
         // the source side is served from the in-memory baseline when
-        // possible; misses run once with the full per-run budget
+        // possible, then the persistent baseline cache; a full miss runs once
+        // with the per-run budget and persists the result. The 1-thread level
+        // is only a 32-run determinism probe, so it samples afresh every time
+        // and never touches the cache.
         bool tsanVariant = t != 1 && useTsan;
-        int srcRuns;
-        ObservedOutcomeSet srcSet;
         std::string baseKey =
             std::to_string(t) + (tsanVariant ? ":tsan" : "");
-        auto baseIt = memo.baselines.find(baseKey);
-        if (baseIt != memo.baselines.end()) {
-            srcSet = baseIt->second;
-            srcRuns = srcSet.totalRuns;
+        int srcRuns;
+        ObservedOutcomeSet srcSet;
+        if (t == 1) {
+            srcSet = collectOutcomeSet(origFn, sweepReps, t);
+            srcRuns = sweepReps;
         } else {
-            srcSet = collectOutcomeSet(origFn, reps, t);
-            srcRuns = reps;
-            memo.baselines[baseKey] = srcSet;
+            auto baseIt = memo.baselines.find(baseKey);
+            if (baseIt != memo.baselines.end()) {
+                srcSet = baseIt->second;
+                srcRuns = srcSet.totalRuns;
+            } else if (loadBaselineCache(memo.sourceHash, baseKey, sweepReps,
+                                         srcSet)) {
+                srcRuns = srcSet.totalRuns;
+                memo.baselines[baseKey] = srcSet;
+            } else {
+                srcSet = collectOutcomeSet(origFn, sweepReps, t);
+                srcRuns = sweepReps;
+                memo.baselines[baseKey] = srcSet;
+                saveBaselineCache(memo.sourceHash, baseKey, sweepReps, srcSet);
+            }
         }
-        ObservedOutcomeSet trSet = collectOutcomeSet(transfFn, reps, t);
+        ObservedOutcomeSet trSet = collectOutcomeSet(transfFn, sweepReps, t);
 
         // retest the source when the transformed side found outcomes that are
         // missing from the baseline, up to a hard per-entry cap; any outcomes
@@ -581,9 +813,15 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                 srcSet = mergeOutcomeSets(srcSet, extraSet);
                 srcRuns += extra;
                 memo.baselines[baseKey] = srcSet;
+                saveBaselineCache(memo.sourceHash, baseKey, sweepReps, srcSet);
                 missing =
                     outcomeSetDifference(trSet.outcomes, srcSet.outcomes);
             }
+            // the cap was reached with outcomes still missing: this entry can
+            // no longer learn, so drop it and let the next run of the file
+            // recollect from scratch
+            if (!missing.empty())
+                clearBaseline(memo, baseKey, sweepReps);
         }
 
         OutcomeSetResult outcomeSet =
@@ -591,16 +829,15 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         CompareResult cmp = outcomeSet.compare;
 
         setup.runInfo.threadResults.push_back(threadResultFromCompare(
-            t, cmp, srcRuns, reps, std::move(outcomeSet)));
+            t, cmp, srcRuns, sweepReps, std::move(outcomeSet)));
 
         tc.status = "done";
         tc.ok = cmp.ok;
         tc.warn = cmp.warn;
         tc.message = cmp.message;
         tc.originalRuns = srcRuns;
-        tc.transformedRuns = reps;
+        tc.transformedRuns = sweepReps;
         tc.outcomeSet = std::move(outcomeSet);
-        saveCheckpoints();
 
         if (!cmp.ok) {
             setup.runInfo.error =
@@ -638,11 +875,15 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
 
     // reuse the compiled source binary and baseline outcome sets kept alive
     // for the whole pipeline; the first run of a file compiles and executes
-    // the full per-thread budget, later runs of the same file reuse it
+    // the full per-thread budget, later runs of the same file reuse it. A new
+    // memo is built off to the side and only installed on success.
     SourceMemo &memo = gSourceMemo[inputFile];
     if (memo.sourceMLIR != sourceMLIR) {
-        if (!memoizeSource(mlirCtx, *module, sourceMLIR, memo, result.error))
+        SourceMemo fresh;
+        if (!memoizeSource(mlirCtx, *module, sourceMLIR, fresh,
+                           result.error))
             return result;
+        memo = std::move(fresh);
     }
     result.llvmIR = memo.sourceJitLLVM;
 
@@ -655,10 +896,14 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
         if (baseIt != memo.baselines.end()) {
             set = baseIt->second;
             runs = set.totalRuns;
+        } else if (loadBaselineCache(memo.sourceHash, baseKey, reps, set)) {
+            runs = set.totalRuns;
+            memo.baselines[baseKey] = set;
         } else {
             set = collectOutcomeSet(memo.plain, reps, t);
             runs = reps;
             memo.baselines[baseKey] = set;
+            saveBaselineCache(memo.sourceHash, baseKey, reps, set);
         }
 
         ExecutionThreadResult tr;
@@ -737,8 +982,6 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
 
     std::random_device rd;
     std::mt19937 rng(rd());
-    std::uniform_int_distribution<size_t> fileDist(
-        0, multiFiles.empty() ? 0 : multiFiles.size() - 1);
 
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
@@ -746,18 +989,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
                           ? opts.seed
                           : static_cast<int>(rng() & 0x7FFFFFFF);
 
-        // per-run file RNG derived only from seed and run index, so a fixed
-        // seed picks the same file every time; a random seed stays random
-        uint32_t fileSeed = static_cast<uint32_t>(runSeed) +
-                            static_cast<uint32_t>(runIdx) * 0x9e3779b9u;
-        std::mt19937 fileRng(fileSeed);
-
-        std::string inputFile;
-
-        if (!opts.multiFolder.empty())
-            inputFile = multiFiles[fileDist(fileRng)];
-        else
-            inputFile = opts.inputFile;
+        std::string inputFile = pickInputFile(opts, multiFiles, runIdx, runSeed);
 
         // run single run and collect the RunInfo; errors and warnings are
         // carried inside the RunInfo and surfaced by the caller, not printed
@@ -808,6 +1040,73 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
     }
 
     result.campaignDir = gCampaignDir;
+    return result;
+}
+
+// emit mode single run: apply the requested transforms and return the
+// resulting MLIR without lowering, JIT, or oracle comparison
+static RunInfo emitSingle(const std::string &inputFile, int seed,
+                          int runIdx, const std::string &transform,
+                          int maxApply) {
+    MLIRSetup setup(seed, runIdx, transform, maxApply);
+    mlir::OwningOpRef<mlir::ModuleOp> originalModule;
+    mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
+    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
+        return setup.runInfo;
+    return setup.runInfo;
+}
+
+// generator mode for --emit-mlir: applies the requested transforms to one
+// file or random files from a folder and returns the transformed MLIR text.
+// No campaign checkpointing or execution state is used.
+PipelineResult runEmitPipeline(const PipelineOptions &opts) {
+    PipelineResult result;
+    result.runs.reserve(opts.numRuns);
+
+    if (!opts.campaignDir.empty()) {
+        result.campaignDir = opts.campaignDir;
+    } else {
+        result.campaignDir = "emitted";
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(result.campaignDir, ec);
+
+    // generator mode overwrites its output: clear stale artifacts from a
+    // previous emit so the directory only holds the current batch
+    for (const auto &entry :
+         std::filesystem::directory_iterator(result.campaignDir, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("run", 0) == 0 && name.find("_seed") != std::string::npos)
+            std::filesystem::remove(entry.path(), ec);
+        else if (name == "result.json")
+            std::filesystem::remove(entry.path(), ec);
+    }
+
+    std::vector<std::string> multiFiles;
+    if (!opts.multiFolder.empty()) {
+        multiFiles = collectMLIRFiles(opts.multiFolder);
+        if (multiFiles.empty()) {
+            RunInfo errInfo;
+            errInfo.error = "no .mlir files in " + opts.multiFolder;
+            errInfo.runNumber = opts.runNumber;
+            result.runs.push_back(errInfo);
+            return result;
+        }
+    }
+
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    for (int i = 0; i < opts.numRuns; ++i) {
+        int runIdx = opts.runNumber + i;
+        int runSeed = (opts.seed >= 0)
+                          ? opts.seed
+                          : static_cast<int>(rng() & 0x7FFFFFFF);
+        std::string inputFile =
+            pickInputFile(opts, multiFiles, runIdx, runSeed);
+        result.runs.push_back(
+            emitSingle(inputFile, runSeed, runIdx, opts.transform,
+                       opts.maxApply));
+    }
     return result;
 }
 

@@ -81,3 +81,4 @@ llvm-project/install/
 results/
 corpus/
 cache/
+emitted/

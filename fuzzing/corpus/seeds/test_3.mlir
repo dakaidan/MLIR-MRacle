@@ -1,4 +1,4 @@
-// test_3: non-atomic load then store, single thread
+// test_3: atomic load then store, single thread
 // forall (x == 1)
 module {
   func.func @main() -> i64 {
@@ -12,9 +12,9 @@ module {
     omp.parallel {
       omp.sections {
         omp.section {
-          // P0: r0 = *x; *x = 1;
-          %r0 = memref.load %x[%c0] : memref<1xi64>
-          memref.store %c1_i64, %x[%c0] : memref<1xi64>
+          // P0: r0 = atomic_load(x); atomic_store(x, 1);
+          %r0 = memref.atomic_rmw addi %c0_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
+          memref.atomic_rmw assign %c1_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
           omp.terminator
         }
         omp.terminator
