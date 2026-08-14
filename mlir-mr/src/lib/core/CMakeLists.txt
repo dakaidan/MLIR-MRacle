@@ -19,4 +19,6 @@ target_link_libraries(mlir_mr_core PUBLIC
     MLIRIR
     MLIRParser
     LLVMSupport
+    LLVMBitReader
+    LLVMBitWriter
 )

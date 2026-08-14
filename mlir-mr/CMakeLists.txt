@@ -1,5 +1,22 @@
 enable_language(CXX)
 
+# Sanitizer and optimisation configuration for all mlir-mr targets. The
+# default (TSan at -O2) keeps race detection for JIT'd programs while keeping
+# the tool itself fast; TSan is already applied explicitly to JIT'd code.
+# "address,undefined" builds an ASan+UBSan tool that catches parser/lowering/
+# JIT memory and UB bugs. ASan and TSan must never be combined in one build;
+# an empty value disables sanitizers entirely.
+set(MLIR_MR_SANITIZERS "thread" CACHE STRING
+    "Sanitizers for mlir-mr targets (comma-separated; empty disables)")
+set(MLIR_MR_OPT_LEVEL "2" CACHE STRING
+    "Optimisation level for mlir-mr targets")
+if(NOT MLIR_MR_SANITIZERS STREQUAL "")
+    add_compile_options(-fsanitize=${MLIR_MR_SANITIZERS} -O${MLIR_MR_OPT_LEVEL})
+    add_link_options(-fsanitize=${MLIR_MR_SANITIZERS})
+else()
+    add_compile_options(-O${MLIR_MR_OPT_LEVEL})
+endif()
+
 # Apple clang does not auto-detect Homebrew's libomp; hint FindOpenMP when
 # present. Done here so both the oracle library and the app resolve the same
 # OpenMP runtime.

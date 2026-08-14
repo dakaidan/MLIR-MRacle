@@ -16,13 +16,14 @@ struct PipelineOptions {
     int runNumber = 0;        // first run index
     int numRuns = 1;          // pipeline repetitions, set by --iter
     bool straightMode = false; // --run: execute each file, no transforms
-    int reps = 10000;          // --reps: executions per program per thread count
+    bool emitMLIR = false;    // --emit-mlir: transform and emit MLIR only
+    int reps = 5000;           // --reps: executions per program per thread count
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
     int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
     std::string campaignDir;  // resume/continue an existing campaign log folder
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
-    int maxSourceReps = 25000; // hard cap for source runs per baseline
+    int maxSourceReps = 100000; // hard cap for source runs per baseline
     int thresholdPct = 5; // transformed-only outcomes below this % warn, above fail
 };
 
@@ -35,6 +36,7 @@ struct PipelineResult {
 };
 
 PipelineResult runPipeline(const PipelineOptions &opts);
+PipelineResult runEmitPipeline(const PipelineOptions &opts);
 
 struct ExecutionPipelineResult {
     std::vector<ExecutionRunResult> runs;

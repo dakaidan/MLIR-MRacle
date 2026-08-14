@@ -155,6 +155,7 @@ struct MetamorphicPass
             {"local-store-duplication", &MetamorphicPass::tryLocalStoreDuplication},
             {"try-insert-random-arith", &MetamorphicPass::tryInsertRandomArith},
             {"try-insert-comparison", &MetamorphicPass::tryInsertComparison},
+            {"try-insert-dead-if", &MetamorphicPass::tryInsertDeadIf},
         };
 
         SmallVector<std::pair<std::string, Transform>, 4> transforms;
@@ -514,27 +515,41 @@ private:
                 memrefToSections[memref].insert(section);
         });
 
-        SmallVector<memref::StoreOp> candidates;
+        SmallVector<Operation *> candidates;
 
-        // find all store ops that are in a section and whose memref is only stored to in that section
+        // find all stores (non-atomic stores and atomic_rmw assign) that are
+        // in a section and whose memref is only accessed in that section.
+        // Only thread-local non-atomic stores or atomic stores qualify:
+        // duplicating a shared non-atomic store would add a data race.
         op.getBody().walk([&](Operation *innerOp) {
-            auto storeOp = dyn_cast<memref::StoreOp>(innerOp);
-            if (!storeOp)
+            Value memref;
+            bool isAtomicStore = false;
+            if (auto storeOp = dyn_cast<memref::StoreOp>(innerOp)) {
+                memref = storeOp.getMemref();
+            } else if (auto atomic = dyn_cast<memref::AtomicRMWOp>(innerOp)) {
+                if (atomic.getKind() != arith::AtomicRMWKind::assign)
+                    return;
+                isAtomicStore = true;
+                memref = atomic.getMemref();
+            } else {
                 return;
+            }
 
-            auto section = storeOp->getParentOfType<omp::SectionOp>();
+            auto section = innerOp->getParentOfType<omp::SectionOp>();
             if (!section)
                 return;
 
-            Value memref = storeOp.getMemref();
+            if (!isAtomicStore && !isThreadLocalMemref(memref, innerOp))
+                return;
 
-            // get the memref
+            // the memref must be only accessed in this section, so the
+            // duplicate stays a per-thread mutation of the same location
             auto it = memrefToSections.find(memref);
+            if (it == memrefToSections.end() || it->second.size() != 1 ||
+                !it->second.contains(section))
+                return;
 
-            // if the memref is only stored to in this section, add the store op to candidates
-            if (it != memrefToSections.end() && it->second.size() == 1 &&
-                it->second.contains(section))
-                candidates.push_back(storeOp);
+            candidates.push_back(innerOp);
         });
 
         if (candidates.empty())
@@ -542,9 +557,8 @@ private:
 
         // pick one store op at random and duplicate it after itself
         std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
-        memref::StoreOp store = candidates[dist(rng)];
+        Operation *store = candidates[dist(rng)];
 
-        // Insert a duplicate store after the original store
         rewriter.setInsertionPointAfter(store);
         rewriter.clone(*store);
 
@@ -581,7 +595,17 @@ private:
                                                /*alignment=*/IntegerAttr{});
 
         auto zeroIdx = arith::ConstantIndexOp::create(rewriter, loc, 0);
-        Value acc = memref::LoadOp::create(rewriter, loc, memref, ValueRange{zeroIdx});
+
+        // initialise the fresh alloca before loading it, so the load never
+        // reads uninitialised memory
+        auto init = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64Type(),
+            rewriter.getI64IntegerAttr(0));
+        memref::StoreOp::create(rewriter, loc, init, memref,
+                                ValueRange{zeroIdx});
+
+        Value acc = memref::LoadOp::create(rewriter, loc, memref,
+                                           ValueRange{zeroIdx});
 
         std::uniform_int_distribution<int64_t> intDist(-100, 100);
         auto makeConst = [&]() {
@@ -653,6 +677,66 @@ private:
                                   value, value);
 
         return true;
+    }
+
+    bool tryInsertDeadIf(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        SmallVector<omp::SectionOp> sections;
+
+        // Walk to find all non-empty omp.section ops in the function body
+        op.getBody().walk([&](Operation *innerOp) {
+            auto sectionOp = dyn_cast<omp::SectionOp>(innerOp);
+            if (!sectionOp || sectionOp.getRegion().empty() ||
+                sectionOp.getRegion().front().empty())
+                return;
+            sections.push_back(sectionOp);
+        });
+
+        if (sections.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, sections.size() - 1);
+        omp::SectionOp targetSection = sections[dist(rng)];
+
+        Block &sectionBlock = targetSection.getRegion().front();
+
+        if (!sectionBlock.back().hasTrait<OpTrait::IsTerminator>())
+            return false;
+
+        size_t numOps = std::distance(sectionBlock.begin(), sectionBlock.end());
+        if (numOps < 2)
+            return false;
+
+        std::uniform_int_distribution<size_t> opDist(0, numOps - 2);
+        Operation &targetOp = *std::next(sectionBlock.begin(), opDist(rng));
+
+        // Avoid moving ops whose results are used.
+        if (!targetOp.use_empty())
+            return false;
+
+        rewriter.setInsertionPoint(&targetOp);
+
+        // Dead if: the condition is always false, so the then region never runs.
+        Value falseValue = arith::ConstantOp::create(
+            rewriter, op.getLoc(), rewriter.getI1Type(),
+            rewriter.getBoolAttr(false));
+        scf::IfOp ifOp = scf::IfOp::create(rewriter, op.getLoc(), falseValue,
+                                           /*withElseRegion=*/false);
+
+        Block *thenBlock = &ifOp.getThenRegion().front();
+        targetOp.moveBefore(thenBlock, thenBlock->end());
+        rewriter.setInsertionPointToEnd(thenBlock);
+        scf::YieldOp::create(rewriter, op.getLoc(), ValueRange{});
+
+        return true;
+    }
+
+    bool tryInsertCriticalOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+    }
+
+    bool tryInsertParallelOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+    }
+
+    bool tryUnrollSingleParallelOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
     }
 };
 
