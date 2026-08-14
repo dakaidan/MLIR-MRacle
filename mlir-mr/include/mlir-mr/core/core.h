@@ -19,7 +19,6 @@ struct PipelineOptions {
     int reps = 10000;          // --reps: executions per program per thread count
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
-    bool log = false;         // also save artifacts for OK runs
     int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
     std::string campaignDir;  // resume/continue an existing campaign log folder
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome

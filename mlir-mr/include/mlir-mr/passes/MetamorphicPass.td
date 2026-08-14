@@ -1,6 +1,6 @@
 include "mlir/Pass/PassBase.td"
 
-def MetamorphicMemoryModelPass : Pass<"MetamorphicMemoryModelPass", "::mlir::ModuleOp"> {
+def MetamorphicPass : Pass<"MetamorphicPass", "::mlir::ModuleOp"> {
 
     let summary = "Implements Metamorphic Transformations for Concurrent Memory Operations";
 
@@ -11,7 +11,7 @@ def MetamorphicMemoryModelPass : Pass<"MetamorphicMemoryModelPass", "::mlir::Mod
         of compiler passes that deal with concurrent memory access.
     }];
 
-    let constructor = "::mlir::createMetamorphicMemoryModelPass()";
+    let constructor = "::mlir::createMetamorphicPass()";
 
     let options = [
       Option<"seed", "seed", "int", "42",

@@ -108,8 +108,6 @@ int main(int argc, char **argv) {
             opts.multiFolder = argv[i] + 8;
         } else if (std::strncmp(argv[i], "--apply=", 8) == 0) {
             opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
-        } else if (std::strcmp(argv[i], "--log") == 0) {
-            opts.log = true;
         } else if (std::strncmp(argv[i], "--tsan=", 7) == 0) {
             opts.tsanPercent = std::strtol(argv[i] + 7, nullptr, 10);
         } else if (std::strncmp(argv[i], "--campaign-dir=", 15) == 0) {
@@ -127,7 +125,7 @@ int main(int argc, char **argv) {
     argc = newArgc;
 
     if (opts.multiFolder.empty() && argc < 2) {
-        std::cerr << "usage: mlir-mr-opt [--log] [--seed=N] "
+        std::cerr << "usage: mlir-mr-opt [--seed=N] "
                      "[--iter=N] [--run] [--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
                      "[--tsan=PERCENT] "
@@ -153,10 +151,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if ((opts.maxSourceReps < opts.reps) && !opts.straightMode) {
-        std::cerr << "--max-runs must be >= --reps\n";
-        return 1;
-    }
+    // Let the retest cap ride along with --reps: a budget above the default
+    // cap raises the cap to the requested count instead of aborting, so the
+    // source baseline always reaches the requested run count.
+    if (opts.maxSourceReps < opts.reps)
+        opts.maxSourceReps = opts.reps;
 
     if (opts.reps <= 0) {
         std::cerr << "--reps must be > 0\n";
@@ -185,7 +184,7 @@ int main(int argc, char **argv) {
     mlir_mr::PipelineResult result = mlir_mr::runPipeline(opts);
 
     std::error_code ec;
-    for (const char *sub : {"fail", "warn"})
+    for (const char *sub : {"fail", "warn", "ok"})
         std::filesystem::create_directories(
             std::filesystem::path(result.campaignDir) / sub, ec);
 
@@ -197,7 +196,7 @@ int main(int argc, char **argv) {
             saveArtifacts(run, "fail", result.campaignDir);
         else if (status == "WARN")
             saveArtifacts(run, "warn", result.campaignDir);
-        else if (opts.log)
+        else
             saveArtifacts(run, "ok", result.campaignDir);
     }
 

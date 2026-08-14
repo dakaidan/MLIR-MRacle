@@ -66,7 +66,7 @@ struct RunInfo {
     std::string error;
     std::string warn;
     // artifacts captured during the run; saved under results/<status>/ for
-    // warn/fail runs (and OK runs when --log is set)
+    // every run
     std::string sourceMLIR;
     std::string transformedMLIR;
     std::string loweredMLIR;

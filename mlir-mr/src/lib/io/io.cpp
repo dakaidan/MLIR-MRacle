@@ -342,12 +342,10 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
     jsonPut(obj, "seed", jsonInt(info.seed));
     jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
 
-    if (status != "OK") {
-        JsonValue threads = jsonArray();
-        for (const auto &tg : info.threadResults)
-            jsonPush(threads, threadResultToJson(tg));
-        jsonPut(obj, "thread_results", std::move(threads));
-    }
+    JsonValue threads = jsonArray();
+    for (const auto &tg : info.threadResults)
+        jsonPush(threads, threadResultToJson(tg));
+    jsonPut(obj, "thread_results", std::move(threads));
     return obj;
 }
 

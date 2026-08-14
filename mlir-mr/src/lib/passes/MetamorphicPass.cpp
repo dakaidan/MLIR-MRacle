@@ -1,4 +1,4 @@
-#include "mlir-mr/passes/MetamorphicMemoryModelPass.h"
+#include "mlir-mr/passes/MetamorphicPass.h"
 #include "mlir-mr/context/context.h"
 
 #include "mlir/Pass/Pass.h"
@@ -24,8 +24,8 @@
 
 namespace mlir {
 
-#define GEN_PASS_DECL_METAMORPHICMEMORYMODELPASS
-#include "MetamorphicMemoryModelPass.inc"
+#define GEN_PASS_DECL_METAMORPHICPASS
+#include "MetamorphicPass.inc"
 
 // Helper functions should go here in anonymous namespace (does not show up in global namespace)
 namespace {
@@ -128,13 +128,13 @@ static bool checkLoadRun(SmallVector<memref::LoadOp> &run,
 }
 
 }
-#define GEN_PASS_DEF_METAMORPHICMEMORYMODELPASS
-#include "MetamorphicMemoryModelPass.inc"
+#define GEN_PASS_DEF_METAMORPHICPASS
+#include "MetamorphicPass.inc"
 
-struct MetamorphicMemoryModelPass
-    : public impl::MetamorphicMemoryModelPassBase<MetamorphicMemoryModelPass> {
+struct MetamorphicPass
+    : public impl::MetamorphicPassBase<MetamorphicPass> {
 
-    using impl::MetamorphicMemoryModelPassBase<MetamorphicMemoryModelPass>::MetamorphicMemoryModelPassBase;
+    using impl::MetamorphicPassBase<MetamorphicPass>::MetamorphicPassBase;
 
     mlir_mr::RunInfo *runInfo = nullptr;
 
@@ -143,18 +143,18 @@ struct MetamorphicMemoryModelPass
         IRRewriter rewriter(op->getContext());
         std::mt19937 rng(seed.getValue());
 
-        using Transform = bool (MetamorphicMemoryModelPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
+        using Transform = bool (MetamorphicPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
 
         // map of transform names to member function pointers
         static const llvm::StringMap<Transform> kTransformMap = {
-            {"multiset-permutation", &MetamorphicMemoryModelPass::tryMultisetPermutation},
-            {"load-reordering", &MetamorphicMemoryModelPass::tryLoadReordering},
-            {"insert-fence", &MetamorphicMemoryModelPass::tryInsertFence},
-            // {"insert-thread", &MetamorphicMemoryModelPass::tryInsertThread},
-            {"insert-atomic-rmw", &MetamorphicMemoryModelPass::tryInsertAtomicRMWInThread},
-            {"local-store-duplication", &MetamorphicMemoryModelPass::tryLocalStoreDuplication},
-            {"try-insert-random-arith", &MetamorphicMemoryModelPass::tryInsertRandomArith},
-            {"try-insert-comparison", &MetamorphicMemoryModelPass::tryInsertComparison},
+            {"multiset-permutation", &MetamorphicPass::tryMultisetPermutation},
+            {"load-reordering", &MetamorphicPass::tryLoadReordering},
+            {"insert-fence", &MetamorphicPass::tryInsertFence},
+            // {"insert-thread", &MetamorphicPass::tryInsertThread},
+            {"insert-atomic-rmw", &MetamorphicPass::tryInsertAtomicRMWInThread},
+            {"local-store-duplication", &MetamorphicPass::tryLocalStoreDuplication},
+            {"try-insert-random-arith", &MetamorphicPass::tryInsertRandomArith},
+            {"try-insert-comparison", &MetamorphicPass::tryInsertComparison},
         };
 
         SmallVector<std::pair<std::string, Transform>, 4> transforms;
@@ -390,6 +390,7 @@ private:
         return true;
     }
 
+    // TODO: subset relation
     // randomly insert an omp.flush fence at a random point in the function
     bool tryInsertFence(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         SmallVector<Operation *> allOps;
@@ -655,14 +656,14 @@ private:
     }
 };
 
-std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
+std::unique_ptr<Pass> createMetamorphicPass(
     int seed, mlir_mr::RunInfo *runInfo, std::string transform,
     int maxApply) {
-    MetamorphicMemoryModelPassOptions options;
+    MetamorphicPassOptions options;
     options.seed = seed;
     options.transform = transform;
     options.maxApply = maxApply;
-    auto pass = std::make_unique<MetamorphicMemoryModelPass>(options);
+    auto pass = std::make_unique<MetamorphicPass>(options);
     pass->runInfo = runInfo;
     return pass;
 }
@@ -670,8 +671,9 @@ std::unique_ptr<Pass> createMetamorphicMemoryModelPass(
 } // namespace mlir
 
 #define GEN_PASS_REGISTRATION
-#include "MetamorphicMemoryModelPass.inc"
+#include "MetamorphicPass.inc"
 #include <list>
 #include <set>
 #include <map>
 #include <cmath>
+#include <iterator>
