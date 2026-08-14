@@ -6,7 +6,7 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
-#include "mlir-mr/passes/MetamorphicMemoryModelPass.h"
+#include "mlir-mr/passes/MetamorphicPass.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir_mr {
@@ -26,8 +26,8 @@ MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform,
     : pm(&mlirContext, mlir::ModuleOp::getOperationName()) {
     runInfo.seed = seed;
     runInfo.runNumber = runNumber;
-    pm.addPass(::mlir::createMetamorphicMemoryModelPass(seed, &runInfo, transform,
-                                                       maxApply));
+    pm.addPass(::mlir::createMetamorphicPass(seed, &runInfo, transform,
+                                            maxApply));
     initializeMLIRContext(mlirContext);
 }
 

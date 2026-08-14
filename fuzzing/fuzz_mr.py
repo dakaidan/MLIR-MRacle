@@ -81,10 +81,6 @@ def main():
         help="maximum number of transformations to apply per run"
     )
     parser.add_argument(
-        "--log", action="store_true",
-        help="log the transformed MLIR, LLVM IR and executable to the logs folder"
-    )
-    parser.add_argument(
         "--tsan", type=int, default=100,
         help="percentage of compilations instrumented with TSan (0-100, default 100)"
     )
@@ -140,8 +136,6 @@ def main():
     if args.multi:
         cmd.append(f"--multi={args.multi}")
     cmd.append(f"--apply={args.apply}")
-    if args.log:
-        cmd.append("--log")
     cmd.append(f"--tsan={args.tsan}")
     cmd.append(f"--threshold={args.threshold}")
     cmd.append(f"--reruns={args.reruns}")
