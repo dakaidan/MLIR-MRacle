@@ -17,3 +17,11 @@ target_link_libraries(mlir_mr_oracle PUBLIC
     OpenMP::OpenMP_CXX
     mlir_mr_context
 )
+
+add_executable(mlir_mr_oracle_test oracle_test.cpp)
+
+set_property(TARGET mlir_mr_oracle_test PROPERTY CXX_STANDARD 23)
+set_property(TARGET mlir_mr_oracle_test PROPERTY CXX_STANDARD_REQUIRED ON)
+set_property(TARGET mlir_mr_oracle_test PROPERTY CXX_EXTENSIONS OFF)
+
+target_link_libraries(mlir_mr_oracle_test PRIVATE MLIRMR::mlir_mr_oracle)

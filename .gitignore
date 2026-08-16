@@ -82,3 +82,5 @@ results/
 corpus/
 cache/
 emitted/
+.DS_Store
+fuzzing/interesting-runs/

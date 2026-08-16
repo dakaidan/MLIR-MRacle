@@ -189,8 +189,9 @@ def main():
     )
     parser.add_argument(
         "--threshold", type=int, default=5,
-        help="transformed-only outcomes below this percent of transformed runs "
-             "are WARN, above are FAIL (default 5)"
+        help="fail threshold: an outcome rare in the source (below this % of "
+             "its runs) appearing at/above this % of transformed runs FAILs; "
+             "other rate deviations beyond the Poisson bound WARN (default 5)"
     )
     parser.add_argument(
         "--reruns", type=int, default=5000,
@@ -269,7 +270,11 @@ def main():
     if args.file:
         cmd.append(args.file)
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # pin the cache root so every invocation shares the project baseline
+    # cache regardless of the working directory
+    env = dict(os.environ)
+    env["MLIR_MR_CACHE_DIR"] = str(CACHE_DIR / "v2")
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sanitizer_hits = scan_sanitizer_output(result.stderr)
 
     # a crashing tool may not print the campaign dir; best-effort log under

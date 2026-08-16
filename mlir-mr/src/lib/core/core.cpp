@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -121,7 +122,7 @@ static void threadFromJson(const llvm::json::Object *o, ThreadCheckpoint &tc) {
 
 static void saveCheckpoints() {
     JsonValue root = jsonObject();
-    jsonPut(root, "oracle_version", jsonInt(5));
+    jsonPut(root, "oracle_version", jsonInt(kResultSchemaVersion));
     JsonValue runs = jsonObject();
     for (const auto &[key, rc] : gCheckpoints) {
         JsonValue r = jsonObject();
@@ -393,7 +394,13 @@ static bool lowerAndTranslate(mlir::ModuleOp module,
 // and source baseline outcome sets are cached as JSON so later campaigns skip
 // the initial source batch. The root is versioned so a format change in the
 // payloads or the cache keys never silently reuses stale entries.
-static std::filesystem::path cacheRoot() { return "cache/v2"; }
+static std::filesystem::path cacheRoot() {
+    // the runner pins the root so every invocation shares the same cache
+    // regardless of the working directory
+    if (const char *dir = std::getenv("MLIR_MR_CACHE_DIR"); dir && *dir)
+        return dir;
+    return "cache/v2";
+}
 
 static std::filesystem::path moduleCacheDir() {
     return cacheRoot() / "modules";
@@ -540,6 +547,15 @@ static void saveBaselineCache(const std::string &sourceHash,
                      buf);
 }
 
+// a baseline cache write deferred until the run verdict is known: only OK
+// runs commit, so a warn or fail never adds an entry to the persistent cache
+struct PendingBaseline {
+    std::string sourceHash;
+    std::string baseKey;
+    int reps = 0;
+    ObservedOutcomeSet set;
+};
+
 // process-lifetime memoisation of source baselines: the compiled source
 // binaries and the outcome sets collected from them are kept alive for the
 // whole pipeline loop, so repeated runs of the same file reuse them instead
@@ -639,6 +655,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                          int retestReps, int maxSourceReps,
                          int thresholdPct, RunCheckpoint &cp) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
+    std::vector<PendingBaseline> pendingBaselines;
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
@@ -795,7 +812,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                 srcSet = collectOutcomeSet(origFn, sweepReps, t);
                 srcRuns = sweepReps;
                 memo.baselines[baseKey] = srcSet;
-                saveBaselineCache(memo.sourceHash, baseKey, sweepReps, srcSet);
+                pendingBaselines.push_back(
+                    {memo.sourceHash, baseKey, sweepReps, srcSet});
             }
         }
         ObservedOutcomeSet trSet = collectOutcomeSet(transfFn, sweepReps, t);
@@ -813,15 +831,25 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                 srcSet = mergeOutcomeSets(srcSet, extraSet);
                 srcRuns += extra;
                 memo.baselines[baseKey] = srcSet;
-                saveBaselineCache(memo.sourceHash, baseKey, sweepReps, srcSet);
+                pendingBaselines.push_back(
+                    {memo.sourceHash, baseKey, sweepReps, srcSet});
                 missing =
                     outcomeSetDifference(trSet.outcomes, srcSet.outcomes);
             }
             // the cap was reached with outcomes still missing: this entry can
             // no longer learn, so drop it and let the next run of the file
             // recollect from scratch
-            if (!missing.empty())
+            if (!missing.empty()) {
                 clearBaseline(memo, baseKey, sweepReps);
+                pendingBaselines.erase(
+                    std::remove_if(pendingBaselines.begin(),
+                                   pendingBaselines.end(),
+                                   [&](const PendingBaseline &p) {
+                                       return p.baseKey == baseKey &&
+                                              p.reps == sweepReps;
+                                   }),
+                    pendingBaselines.end());
+            }
         }
 
         OutcomeSetResult outcomeSet =
@@ -846,6 +874,14 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         }
         if (cmp.warn)
             setup.runInfo.warn = cmp.message;
+    }
+
+    // commit the deferred baseline writes only when the run is OK; a warn or
+    // fail leaves the persistent cache untouched
+    if (setup.runInfo.error.empty() && setup.runInfo.warn.empty()) {
+        for (const auto &pending : pendingBaselines)
+            saveBaselineCache(pending.sourceHash, pending.baseKey, pending.reps,
+                              pending.set);
     }
 
     cp.error = setup.runInfo.error;

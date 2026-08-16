@@ -24,11 +24,11 @@ struct PipelineOptions {
     std::string campaignDir;  // resume/continue an existing campaign log folder
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
     int maxSourceReps = 100000; // hard cap for source runs per baseline
-    int thresholdPct = 5; // transformed-only outcomes below this % warn, above fail
+    int thresholdPct = 5; // transformed-only outcomes at/above this % fail, below warn
 };
 
 // schema version shared by checkpoint files
-inline constexpr int kResultSchemaVersion = 5;
+inline constexpr int kResultSchemaVersion = 7;
 
 struct PipelineResult {
     std::vector<RunInfo> runs;

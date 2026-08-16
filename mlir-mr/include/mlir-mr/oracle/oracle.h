@@ -30,10 +30,15 @@ std::vector<JointOutcome> outcomeSetDifference(
 
 // Compares the observed outcome sets of the source and transformed programs.
 // At 1 thread both sets must hold exactly one, identical outcome; any
-// multi-valued set or mismatch is a failure. At higher thread counts,
-// transformed-only outcomes that are rare in the transformed batch (below
-// thresholdPct percent of its runs) warn; the rest fail. Outcomes unique to
-// the source warn.
+// multi-valued set or mismatch is a failure. At higher thread counts the
+// comparison is one-directional: the source distribution is the reference
+// and only the transformed counts are judged. Every outcome in the union of
+// the two sets is checked against the count the source rate predicts for the
+// transformed batch; outcomes absent from the source are anchored on one
+// expected chance occurrence. An outcome the source produces below
+// thresholdPct percent of its runs that appears at or above that rate in the
+// transformed batch fails. Other transformed counts outside the two-sided
+// Poisson range of the expected count (p < 1e-6) warn; the rest are ok.
 OutcomeSetResult compareOutcomeSets(const ObservedOutcomeSet &source,
                                     const ObservedOutcomeSet &transformed,
                                     int numThreads, int thresholdPct);
