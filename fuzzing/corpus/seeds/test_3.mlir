@@ -13,8 +13,11 @@ module {
       omp.sections {
         omp.section {
           // P0: r0 = atomic_load(x); atomic_store(x, 1);
-          %r0 = memref.atomic_rmw addi %c0_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
-          memref.atomic_rmw assign %c1_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
+          %r0_mem = memref.alloca() : memref<1xi64>
+          memref.store %c0_i64, %r0_mem[%c0] : memref<1xi64>
+          omp.atomic.read %r0_mem = %x memory_order(relaxed) : memref<1xi64>, memref<1xi64>, i64
+          %r0 = memref.load %r0_mem[%c0] : memref<1xi64>
+          omp.atomic.write %x = %c1_i64 memory_order(relaxed) : memref<1xi64>, i64
           omp.terminator
         }
         omp.terminator

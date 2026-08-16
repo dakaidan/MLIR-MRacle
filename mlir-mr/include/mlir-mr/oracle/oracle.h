@@ -29,10 +29,11 @@ std::vector<JointOutcome> outcomeSetDifference(
     const std::vector<JointOutcome> &rhs);
 
 // Compares the observed outcome sets of the source and transformed programs.
-// At 1 thread both sets must be identical and any multi-valued outcome is a
-// non-determinism warning. At higher thread counts, transformed-only outcomes
-// that are rare in the transformed batch (below thresholdPct percent of its
-// runs) warn; the rest fail. Outcomes unique to the source warn.
+// At 1 thread both sets must hold exactly one, identical outcome; any
+// multi-valued set or mismatch is a failure. At higher thread counts,
+// transformed-only outcomes that are rare in the transformed batch (below
+// thresholdPct percent of its runs) warn; the rest fail. Outcomes unique to
+// the source warn.
 OutcomeSetResult compareOutcomeSets(const ObservedOutcomeSet &source,
                                     const ObservedOutcomeSet &transformed,
                                     int numThreads, int thresholdPct);

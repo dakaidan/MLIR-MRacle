@@ -12,6 +12,7 @@ target_include_directories(mlir_mr_lowering PUBLIC
 target_link_libraries(mlir_mr_lowering PUBLIC
     llvm_mlir_headers
     MLIRIR
+    MLIRPass
     MLIRTransforms
     MLIRAffineToStandard
     MLIRSCFToControlFlow
@@ -21,4 +22,5 @@ target_link_libraries(mlir_mr_lowering PUBLIC
     MLIRMemRefToLLVM
     MLIROpenMPToLLVM
     MLIRControlFlowToLLVM
+    MLIRReconcileUnrealizedCasts
 )

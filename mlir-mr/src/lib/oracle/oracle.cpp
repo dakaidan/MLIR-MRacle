@@ -108,15 +108,17 @@ OutcomeSetResult compareOutcomeSets(const ObservedOutcomeSet &source,
                         std::back_inserter(transformedOnly));
 
     if (numThreads == 1) {
-        bool nondet =
-            source.outcomes.size() > 1 || transformed.outcomes.size() > 1;
-        if (!sourceOnly.empty() || !transformedOnly.empty()) {
-            result.compare = {false, false,
-                              nondet ? "non-deterministic with 1 thread; result mismatch"
-                                     : "result mismatch"};
+        // Single-thread runs must be deterministic: exactly one observed
+        // outcome per set, and the two outcomes must match.
+        bool singleMatch =
+            source.outcomes.size() == 1 && transformed.outcomes.size() == 1 &&
+            source.outcomes.front() == transformed.outcomes.front();
+        if (singleMatch) {
+            result.compare = {true, false, ""};
+        } else if (sourceOnly.empty() && transformedOnly.empty()) {
+            result.compare = {false, false, "non-deterministic with 1 thread"};
         } else {
-            result.compare = {true, nondet,
-                              nondet ? "non-deterministic with 1 thread" : ""};
+            result.compare = {false, false, "result mismatch"};
         }
         return result;
     }

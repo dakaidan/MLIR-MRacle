@@ -17,15 +17,15 @@ module {
         omp.section {
           // P0: atomic_store(x, 2, seq_cst);
           //     atomic_store(y, 1, seq_cst);
-          memref.atomic_rmw assign %c2_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
-          memref.atomic_rmw assign %c1_i64, %y[%c0] : (i64, memref<1xi64>) -> i64
+          omp.atomic.write %x = %c2_i64 memory_order(seq_cst) : memref<1xi64>, i64
+          omp.atomic.write %y = %c1_i64 memory_order(seq_cst) : memref<1xi64>, i64
           omp.terminator
         }
         omp.section {
           // P1: atomic_store(y, 2, seq_cst);
           //     atomic_store(x, 1, seq_cst);
-          memref.atomic_rmw assign %c2_i64, %y[%c0] : (i64, memref<1xi64>) -> i64
-          memref.atomic_rmw assign %c1_i64, %x[%c0] : (i64, memref<1xi64>) -> i64
+          omp.atomic.write %y = %c2_i64 memory_order(seq_cst) : memref<1xi64>, i64
+          omp.atomic.write %x = %c1_i64 memory_order(seq_cst) : memref<1xi64>, i64
           omp.terminator
         }
         omp.terminator
