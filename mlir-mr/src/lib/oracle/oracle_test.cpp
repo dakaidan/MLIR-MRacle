@@ -117,6 +117,60 @@ int main() {
                true, false);
     }
 
+    // subset: a transformed-only novel outcome at a common rate is a FAIL,
+    // since the transformed set must not add outcomes
+    {
+        auto src = makeSet({{1, 5000}}, 5000);
+        auto tr = makeSet({{1, 4500}, {2, 500}}, 5000);
+        expect("subset novel common outcome",
+               mlir_mr::compareOutcomeSetsSubset(src, tr, 2, kThreshold)
+                   .compare,
+               false, false);
+    }
+
+    // subset: a transformed-only rare novel outcome stays within the
+    // one-chance-occurrence bound -> OK
+    {
+        auto src = makeSet({{1, 5000}}, 5000);
+        auto tr = makeSet({{1, 4999}, {2, 1}}, 5000);
+        expect("subset novel single occurrence",
+               mlir_mr::compareOutcomeSetsSubset(src, tr, 2, kThreshold)
+                   .compare,
+               true, false);
+    }
+
+    // superset: extra transformed outcomes are allowed -> OK
+    {
+        auto src = makeSet({{1, 5000}}, 5000);
+        auto tr = makeSet({{1, 4999}, {2, 1}}, 5000);
+        expect("superset extra outcome allowed",
+               mlir_mr::compareOutcomeSetsSuperset(src, tr, 2, kThreshold)
+                   .compare,
+               true, false);
+    }
+
+    // superset: a common source outcome missing from the transformed set is
+    // a FAIL
+    {
+        auto src = makeSet({{1, 2500}, {2, 2500}}, 5000);
+        auto tr = makeSet({{1, 5000}}, 5000);
+        expect("superset common outcome missing",
+               mlir_mr::compareOutcomeSetsSuperset(src, tr, 2, kThreshold)
+                   .compare,
+               false, false);
+    }
+
+    // superset: a rare source outcome missing from the transformed set warns
+    // when its absence is statistically significant (e^-50 < 1e-6)
+    {
+        auto src = makeSet({{1, 4950}, {2, 50}}, 5000);
+        auto tr = makeSet({{1, 5000}}, 5000);
+        expect("superset rare outcome missing",
+               mlir_mr::compareOutcomeSetsSuperset(src, tr, 2, kThreshold)
+                   .compare,
+               true, true);
+    }
+
     std::printf("%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES",
                 failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

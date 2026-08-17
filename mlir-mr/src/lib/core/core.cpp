@@ -33,225 +33,24 @@
 
 namespace mlir_mr {
 
-// per-campaign log folder; the checkpoint file lives inside it
+// per-campaign log folder; runs are written into it as they complete
 static std::string gCampaignDir;
-static std::string gCheckpointPath;
 
 // the 1-thread group is a determinism check, so a small budget suffices
 static constexpr int kDeterminismReps = 32;
 
-// per-thread-level progress of one run
-struct ThreadCheckpoint {
-    std::string status = "pending"; // pending | done
-    bool ok = true;                 // final verdict for done levels
-    bool warn = false;
-    std::string message;
-    int originalRuns = 0;           // final run counts for done levels
-    int transformedRuns = 0;
-    OutcomeSetResult outcomeSet;
-};
-
-// progress of one metamorphic run, keyed by "run<i>_seed<s>" in the
-// checkpoint file so interrupted campaigns resume exactly where they stopped
-struct RunCheckpoint {
-    std::string file;
-    int seed = 0;
-    std::vector<std::string> requestedTransforms;
-    std::vector<std::string> appliedTransformNames;
-    std::vector<std::string> appliedTransformTargets;
-    bool transformApplied = false;
-    std::string error;
-    std::string warn;
-    std::map<int, ThreadCheckpoint> threads;
-};
-
-static std::map<std::string, RunCheckpoint> gCheckpoints;
-
-// deletes the campaign checkpoint once the pipeline finishes, so a completed
-// campaign never leaves a resumable state behind
-struct CheckpointCleanup {
-    ~CheckpointCleanup() {
-        std::error_code ec;
-        std::filesystem::remove(gCheckpointPath, ec);
-        std::filesystem::remove(gCheckpointPath + ".tmp", ec);
-    }
-};
-
-// --- checkpoint persistence -------------------------------------------------
-
-static JsonValue threadToJson(const ThreadCheckpoint &tc) {
-    JsonValue o = jsonObject();
-    jsonPut(o, "status", jsonString(tc.status));
-    if (tc.status == "done") {
-        jsonPut(o, "ok", jsonBool(tc.ok));
-        jsonPut(o, "warn", jsonBool(tc.warn));
-        jsonPut(o, "message", jsonString(tc.message));
-        jsonPut(o, "original_runs", jsonInt(tc.originalRuns));
-        jsonPut(o, "transformed_runs", jsonInt(tc.transformedRuns));
-        jsonPut(o, "outcome_set", outcomeSetResultToJson(tc.outcomeSet));
-    }
-    return o;
-}
-
-static void threadFromJson(const llvm::json::Object *o, ThreadCheckpoint &tc) {
-    if (!o)
-        return;
-    if (auto s = o->getString("status"))
-        tc.status = s->str();
-    if (tc.status == "done") {
-        if (auto b = o->getBoolean("ok"))
-            tc.ok = *b;
-        if (auto b = o->getBoolean("warn"))
-            tc.warn = *b;
-        if (auto s = o->getString("message"))
-            tc.message = s->str();
-        if (auto s = o->getInteger("original_runs"))
-            tc.originalRuns = static_cast<int>(*s);
-        if (auto s = o->getInteger("transformed_runs"))
-            tc.transformedRuns = static_cast<int>(*s);
-        if (const auto *os = o->getObject("outcome_set")) {
-            OutcomeSetResult result;
-            if (outcomeSetResultFromJson(*os, result)) {
-                result.source.totalRuns = tc.originalRuns;
-                result.transformed.totalRuns = tc.transformedRuns;
-                tc.outcomeSet = std::move(result);
-            }
-        }
-    }
-}
-
-static void saveCheckpoints() {
-    JsonValue root = jsonObject();
-    jsonPut(root, "oracle_version", jsonInt(kResultSchemaVersion));
-    JsonValue runs = jsonObject();
-    for (const auto &[key, rc] : gCheckpoints) {
-        JsonValue r = jsonObject();
-        jsonPut(r, "file", jsonString(rc.file));
-        jsonPut(r, "seed", jsonInt(rc.seed));
-        jsonPut(r, "transform_applied", jsonBool(rc.transformApplied));
-        jsonPut(r, "error", jsonString(rc.error));
-        jsonPut(r, "warn", jsonString(rc.warn));
-        JsonValue requested = jsonArray();
-        for (const auto &t : rc.requestedTransforms)
-            jsonPush(requested, jsonString(t));
-        jsonPut(r, "requested_transforms", std::move(requested));
-        JsonValue applied = jsonArray();
-        for (size_t i = 0; i < rc.appliedTransformNames.size(); ++i) {
-            JsonValue a = jsonObject();
-            jsonPut(a, "name", jsonString(rc.appliedTransformNames[i]));
-            jsonPut(a, "target_function",
-                    jsonString(i < rc.appliedTransformTargets.size()
-                                   ? rc.appliedTransformTargets[i]
-                                   : std::string()));
-            jsonPush(applied, std::move(a));
-        }
-        jsonPut(r, "applied_transforms", std::move(applied));
-        JsonValue threads = jsonObject();
-        for (const auto &[t, tc] : rc.threads)
-            jsonPut(threads, std::to_string(t), threadToJson(tc));
-        jsonPut(r, "threads", std::move(threads));
-        jsonPut(runs, key, std::move(r));
-    }
-    jsonPut(root, "runs", std::move(runs));
-
-    std::string buf;
-    llvm::raw_string_ostream os(buf);
-    printJson(root, os);
-    os << "\n";
-    os.flush();
-
-    std::string tmp = gCheckpointPath + ".tmp";
-    {
-        std::ofstream f(tmp);
-        f << buf;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, gCheckpointPath, ec);
-}
-
-static void loadCheckpoints() {
-    std::ifstream f(gCheckpointPath);
-    if (!f)
-        return;
-    std::string content((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
-    auto parsed = llvm::json::parse(content);
-    if (!parsed)
-        return;
-    const auto *root = parsed->getAsObject();
-    if (!root)
-        return;
-    // checkpoint schema is coupled to the oracle version; a mismatch means
-    // the file predates the current result format and is discarded
-    if (auto v = root->getInteger("oracle_version"); !v ||
-                 *v != kResultSchemaVersion)
-        return;
-    const auto *runs = root->getObject("runs");
-    if (!runs)
-        return;
-    for (const auto &kv : *runs) {
-        const auto *r = kv.second.getAsObject();
-        if (!r)
-            continue;
-        RunCheckpoint rc;
-        if (auto s = r->getString("file"))
-            rc.file = s->str();
-        if (auto s = r->getInteger("seed"))
-            rc.seed = static_cast<int>(*s);
-        if (auto b = r->getBoolean("transform_applied"))
-            rc.transformApplied = *b;
-        if (auto s = r->getString("error"))
-            rc.error = s->str();
-        if (auto s = r->getString("warn"))
-            rc.warn = s->str();
-        if (const auto *requested = r->getArray("requested_transforms"))
-            for (const auto &rv : *requested)
-                if (auto s = rv.getAsString())
-                    rc.requestedTransforms.push_back(s->str());
-        if (const auto *applied = r->getArray("applied_transforms"))
-            for (const auto &av : *applied)
-                if (const auto *ao = av.getAsObject()) {
-                    if (auto s = ao->getString("name"))
-                        rc.appliedTransformNames.push_back(s->str());
-                    if (auto s = ao->getString("target_function"))
-                        rc.appliedTransformTargets.push_back(s->str());
-                }
-        if (const auto *threads = r->getObject("threads"))
-            for (const auto &kv : *threads) {
-                ThreadCheckpoint tc;
-                threadFromJson(kv.second.getAsObject(), tc);
-                rc.threads[std::stoi(kv.first.str())] = std::move(tc);
-            }
-        gCheckpoints[kv.first.str()] = std::move(rc);
-    }
-}
-
-static bool allThreadsDone(const RunCheckpoint &rc) {
-    if (rc.threads.empty())
-        return false;
-    for (const auto &[t, tc] : rc.threads)
-        if (tc.status != "done")
-            return false;
-    return true;
-}
+// the first few warns of a source file are verified before they are
+// reported: the source baseline is retested (up to the per-level cap) and
+// merged into the baseline, and the comparison is re-judged, so a poisoned
+// baseline cannot warn before it has been checked; only a warn that survives
+// the extra source data stands. Later warns are trusted as-is.
+static constexpr int kBaselineWarnLimit = 5;
 
 // maps an oracle verdict onto the thread-level status string
 static std::string statusFromVerdict(bool ok, bool warn) {
     if (!ok)
         return "ERROR";
     return warn ? "WARN" : "OK";
-}
-
-static ThreadGroupResult threadResultFromCheckpoint(
-    int t, const ThreadCheckpoint &tc) {
-    ThreadGroupResult tg;
-    tg.numThreads = t;
-    tg.status = statusFromVerdict(tc.ok, tc.warn);
-    tg.message = tc.message;
-    tg.originalRuns = tc.originalRuns;
-    tg.transformedRuns = tc.transformedRuns;
-    tg.outcomeSet = tc.outcomeSet;
-    return tg;
 }
 
 static ThreadGroupResult threadResultFromCompare(
@@ -265,6 +64,22 @@ static ThreadGroupResult threadResultFromCompare(
     tg.transformedRuns = trRuns;
     tg.outcomeSet = std::move(outcomeSet);
     return tg;
+}
+
+// applies the relation-specific oracle to a source/transformed outcome-set
+// pair; used for the initial judgement and for the warn-verification re-judge
+static OutcomeSetResult judgeOutcomeSets(OutcomeRelation relation,
+                                         const ObservedOutcomeSet &src,
+                                         const ObservedOutcomeSet &tr,
+                                         int t, int thresholdPct) {
+    switch (relation) {
+    case OutcomeRelation::Subset:
+        return compareOutcomeSetsSubset(src, tr, t, thresholdPct);
+    case OutcomeRelation::Superset:
+        return compareOutcomeSetsSuperset(src, tr, t, thresholdPct);
+    default:
+        return compareOutcomeSets(src, tr, t, thresholdPct);
+    }
 }
 
 // helper function for multi mode, collects all .mlir files in the given folder
@@ -308,6 +123,71 @@ static void createCampaignDir(const PipelineOptions &opts) {
     }
     std::error_code ec;
     std::filesystem::create_directories(gCampaignDir, ec);
+}
+
+// writes the artifacts of a single run under
+// <campaignDir>/<status>/run<N>_seed<S>/ so a long campaign publishes each
+// run's output as it completes instead of buffering everything until the end
+static void saveRunArtifacts(const RunInfo &run, const std::string &status,
+                             const std::string &campaignDir) {
+    std::filesystem::path dir =
+        std::filesystem::path(campaignDir) / status /
+        ("run" + std::to_string(run.runNumber) + "_seed" +
+         std::to_string(run.seed));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    auto writeIfNonEmpty = [&](const std::string &name,
+                               const std::string &content) {
+        if (content.empty())
+            return;
+        std::ofstream os((dir / name).string());
+        os << content;
+    };
+    writeIfNonEmpty("source.mlir", run.sourceMLIR);
+    writeIfNonEmpty("transformed.mlir", run.transformedMLIR);
+    writeIfNonEmpty("lowered.mlir", run.loweredMLIR);
+    writeIfNonEmpty("transformed.ll", run.jitLLVM);
+    writeIfNonEmpty("source.ll", run.sourceJitLLVM);
+    writeIfNonEmpty("module.bc", run.bitcode);
+
+    std::string infoBuf;
+    llvm::raw_string_ostream infoOs(infoBuf);
+    printJson(runInfoToStatusJson(run), infoOs);
+    infoOs << "\n";
+    infoOs.flush();
+    std::ofstream infoFile((dir / "run_info.json").string());
+    infoFile << infoBuf;
+}
+
+// writes the .ll artifact of one execution-mode run under
+// <campaignDir>/run<N>_seed<S>/
+static void saveExecutionArtifacts(const ExecutionRunResult &run,
+                                   const std::string &campaignDir) {
+    if (run.llvmIR.empty())
+        return;
+    std::filesystem::path dir =
+        std::filesystem::path(campaignDir) /
+        ("run" + std::to_string(run.runNumber) + "_seed" +
+         std::to_string(run.seed));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::ofstream os((dir / "source.ll").string());
+    os << run.llvmIR;
+}
+
+// writes the campaign's result.json
+static void writeResultJson(const JsonValue &arr,
+                            const std::string &campaignDir) {
+    std::filesystem::path logPath =
+        std::filesystem::path(campaignDir) / "result.json";
+    std::string logBuf;
+    llvm::raw_string_ostream logOs(logBuf);
+    printJson(arr, logOs);
+    logOs << "\n";
+    logOs.flush();
+    std::ofstream logFile(logPath.string());
+    logFile << logBuf;
 }
 
 // parses a source file, capturing diagnostics in error
@@ -394,10 +274,20 @@ static bool lowerAndTranslate(mlir::ModuleOp module,
 // and source baseline outcome sets are cached as JSON so later campaigns skip
 // the initial source batch. The root is versioned so a format change in the
 // payloads or the cache keys never silently reuses stale entries.
+// An explicitly empty MLIR_MR_CACHE_DIR disables the disk cache entirely;
+// an unset variable uses the default cache/v2 root.
+static bool cachingEnabled() {
+    if (const char *dir = std::getenv("MLIR_MR_CACHE_DIR"))
+        return *dir != '\0';
+    return true;
+}
+
 static std::filesystem::path cacheRoot() {
+    if (!cachingEnabled())
+        return {};
     // the runner pins the root so every invocation shares the same cache
     // regardless of the working directory
-    if (const char *dir = std::getenv("MLIR_MR_CACHE_DIR"); dir && *dir)
+    if (const char *dir = std::getenv("MLIR_MR_CACHE_DIR"))
         return dir;
     return "cache/v2";
 }
@@ -422,19 +312,55 @@ static std::filesystem::path llvmIRCachePath(const std::string &hash) {
     return moduleCacheDir() / (hash + ".ll");
 }
 
+// defined below; forward-declared for baselineCachePath
+static std::string hashString(const std::string &s);
+
 // the baseline cache key includes the sampling budget so a campaign run with
-// a different --reps never reuses a baseline collected with another budget
+// a different --reps never reuses a baseline collected with another budget.
+// The key also embeds the result schema version both in the hash input and in
+// the file-name prefix, so a format change neither reuses nor orphans stale
+// entries: the prefix lets ensureCacheDirs sweep them before a new campaign
+// starts.
 static std::filesystem::path baselineCachePath(const std::string &hash,
                                                const std::string &variant,
                                                int reps) {
+    std::string versionedHash =
+        hashString(hash + "|schema:" + std::to_string(kResultSchemaVersion));
     return baselineCacheDir() /
-           (hash + "_r" + std::to_string(reps) + "_" + variant + ".json");
+           ("v" + std::to_string(kResultSchemaVersion) + "_" + versionedHash +
+            "_r" + std::to_string(reps) + "_" + variant + ".json");
+}
+
+// removes baseline cache files left by an older result schema: the current
+// schema prefixes its baseline files with "v<N>_", so any other .json in the
+// baseline cache is stale. Runs once per process, before the first baseline
+// lookup or write.
+static void sweepStaleBaselines() {
+    if (!cachingEnabled())
+        return;
+    static bool swept = false;
+    if (swept)
+        return;
+    swept = true;
+    const std::string prefix =
+        "v" + std::to_string(kResultSchemaVersion) + "_";
+    std::error_code ec;
+    for (const auto &entry :
+         std::filesystem::directory_iterator(baselineCacheDir(), ec)) {
+        if (entry.is_regular_file() &&
+            entry.path().extension() == ".json" &&
+            entry.path().filename().string().rfind(prefix, 0) != 0)
+            std::filesystem::remove(entry.path(), ec);
+    }
 }
 
 static void ensureCacheDirs() {
+    if (!cachingEnabled())
+        return;
     std::error_code ec;
     std::filesystem::create_directories(moduleCacheDir(), ec);
     std::filesystem::create_directories(baselineCacheDir(), ec);
+    sweepStaleBaselines();
 }
 
 static bool readFileContent(const std::string &path, std::string &content) {
@@ -498,6 +424,8 @@ static bool loadModuleCache(const std::string &hash, llvm::LLVMContext &ctx,
                             std::unique_ptr<llvm::Module> &module,
                             std::string *loweredMLIR, std::string *llvmIR,
                             std::string *bitcode, std::string &error) {
+    if (!cachingEnabled())
+        return false;
     if (!loadCachedModule(moduleCachePath(hash).string(), ctx, module, error))
         return false;
     if (loweredMLIR)
@@ -512,6 +440,8 @@ static bool loadModuleCache(const std::string &hash, llvm::LLVMContext &ctx,
 static void saveModuleCache(const std::string &hash, llvm::Module &module,
                             const std::string &loweredMLIR,
                             const std::string &llvmIR) {
+    if (!cachingEnabled())
+        return;
     ensureCacheDirs();
     saveCachedModule(moduleCachePath(hash).string(), module);
     writeFileContent(loweredCachePath(hash).string(), loweredMLIR);
@@ -521,6 +451,8 @@ static void saveModuleCache(const std::string &hash, llvm::Module &module,
 static bool loadBaselineCache(const std::string &sourceHash,
                               const std::string &variant, int reps,
                               ObservedOutcomeSet &set) {
+    if (!cachingEnabled())
+        return false;
     std::string content;
     if (!readFileContent(baselineCachePath(sourceHash, variant, reps).string(),
                          content))
@@ -537,6 +469,8 @@ static bool loadBaselineCache(const std::string &sourceHash,
 static void saveBaselineCache(const std::string &sourceHash,
                               const std::string &variant, int reps,
                               const ObservedOutcomeSet &set) {
+    if (!cachingEnabled())
+        return;
     ensureCacheDirs();
     std::string buf;
     llvm::raw_string_ostream os(buf);
@@ -547,8 +481,10 @@ static void saveBaselineCache(const std::string &sourceHash,
                      buf);
 }
 
-// a baseline cache write deferred until the run verdict is known: only OK
-// runs commit, so a warn or fail never adds an entry to the persistent cache
+// a baseline cache write deferred until the run verdict is known: normally
+// only OK runs commit, but a run that verified a warn (extra source data
+// merged into the baseline) commits as well, so the grown baseline is
+// persisted whether the warn resolved or was confirmed
 struct PendingBaseline {
     std::string sourceHash;
     std::string baseKey;
@@ -571,6 +507,7 @@ struct SourceMemo {
     std::function<std::vector<int64_t>()> tsan;
     std::string tsanError;
     std::map<std::string, ObservedOutcomeSet> baselines; // key "t[:tsan]"
+    int warnCount = 0; // warns of this file; the first few are verified
 };
 
 static std::map<std::string, SourceMemo> gSourceMemo; // keyed by file path
@@ -582,6 +519,8 @@ static std::map<std::string, SourceMemo> gSourceMemo; // keyed by file path
 static void clearBaseline(SourceMemo &memo, const std::string &baseKey,
                           int reps) {
     memo.baselines.erase(baseKey);
+    if (!cachingEnabled())
+        return;
     std::error_code ec;
     std::filesystem::remove(
         baselineCachePath(memo.sourceHash, baseKey, reps).string(), ec);
@@ -598,6 +537,7 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
     memo.plain = nullptr;
     memo.tsanModule.reset();
     memo.baselines.clear();
+    memo.warnCount = 0;
     memo.tsanError.clear();
     memo.llvmCtx = std::make_unique<llvm::LLVMContext>();
     memo.sourceMLIR = sourceMLIR;
@@ -647,13 +587,11 @@ static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
 }
 
 // single run mode, returns a RunInfo struct with the results of the run.
-// cp records per-thread progress into the campaign checkpoint so a killed
-// invocation can be resumed without discarding executed batches.
 static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
                          int maxApply, int tsanPercent, int reps,
                          int retestReps, int maxSourceReps,
-                         int thresholdPct, RunCheckpoint &cp) {
+                         int thresholdPct) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     std::vector<PendingBaseline> pendingBaselines;
 
@@ -713,17 +651,6 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     std::uniform_int_distribution<int> tsanDist(0, 99);
     bool useTsan = tsanDist(rng) < tsanPercent;
 
-    // record what this run applied, so a skipped run can be reconstructed
-    // from the checkpoint instead of being re-executed
-    cp.requestedTransforms = setup.runInfo.requestedTransforms;
-    cp.transformApplied = setup.runInfo.transformApplied;
-    cp.appliedTransformNames.clear();
-    cp.appliedTransformTargets.clear();
-    for (const auto &at : setup.runInfo.appliedTransforms) {
-        cp.appliedTransformNames.push_back(at.name);
-        cp.appliedTransformTargets.push_back(at.targetFunction);
-    }
-
     std::string compileError;
 
     // the 1-thread determinism check never uses TSan; the multi-threaded
@@ -757,26 +684,9 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // compare the observed outcome sets for each thread count separately.
     // Every tuple of return values is compared as one unit, so swapped or
     // duplicated outputs stay distinguishable; the 1-thread group is a
-    // determinism check (no concurrency means no TSan either). Progress is
-    // checkpointed once per run.
+    // determinism check (no concurrency means no TSan either).
+    bool verified = false;
     for (int t : kThreadCounts) {
-        ThreadCheckpoint &tc = cp.threads[t];
-
-        // a level completed in a previous invocation is replayed from the
-        // checkpoint instead of re-executed
-        if (tc.status == "done") {
-            setup.runInfo.threadResults.push_back(
-                threadResultFromCheckpoint(t, tc));
-            if (!tc.ok) {
-                setup.runInfo.error =
-                    "threads=" + std::to_string(t) + ": " + tc.message;
-                break;
-            }
-            if (tc.warn)
-                setup.runInfo.warn = tc.message;
-            continue;
-        }
-
         // the 1-thread level only needs to confirm a single deterministic
         // outcome, so it runs on a much smaller budget than the sweep levels
         int sweepReps = (t == 1) ? kDeterminismReps : reps;
@@ -818,10 +728,26 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         }
         ObservedOutcomeSet trSet = collectOutcomeSet(transfFn, sweepReps, t);
 
-        // retest the source when the transformed side found outcomes that are
-        // missing from the baseline, up to a hard per-entry cap; any outcomes
-        // found are merged back into the in-memory baseline
-        if (t != 1) {
+        // retest until the missing-outcome side is saturated, up to a hard
+        // per-level cap. For equality and subset the transformed side must be
+        // contained in the source baseline, so the source is retested and
+        // merged back into the baseline. For superset every source outcome
+        // must survive into the transformed side, so the transformed side is
+        // retested instead (it is per-run and never cached).
+        if (t != 1 &&
+            setup.runInfo.relation == OutcomeRelation::Superset) {
+            auto missing =
+                outcomeSetDifference(srcSet.outcomes, trSet.outcomes);
+            while (!missing.empty() && trSet.totalRuns < maxSourceReps) {
+                int extra = static_cast<int>(std::min<int64_t>(
+                    retestReps, maxSourceReps - trSet.totalRuns));
+                ObservedOutcomeSet extraSet =
+                    collectOutcomeSet(transfFn, extra, t);
+                trSet = mergeOutcomeSets(trSet, extraSet);
+                missing =
+                    outcomeSetDifference(srcSet.outcomes, trSet.outcomes);
+            }
+        } else if (t != 1) {
             auto missing =
                 outcomeSetDifference(trSet.outcomes, srcSet.outcomes);
             while (!missing.empty() && srcRuns < maxSourceReps) {
@@ -853,19 +779,36 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         }
 
         OutcomeSetResult outcomeSet =
-            compareOutcomeSets(srcSet, trSet, t, thresholdPct);
+            judgeOutcomeSets(setup.runInfo.relation, srcSet, trSet, t,
+                             thresholdPct);
         CompareResult cmp = outcomeSet.compare;
 
-        setup.runInfo.threadResults.push_back(threadResultFromCompare(
-            t, cmp, srcRuns, sweepReps, std::move(outcomeSet)));
+        // the first few warns per file are verified against extra source
+        // data: the source is retested and merged into the baseline (those
+        // runs stay in the baseline), and the comparison is re-judged, so a
+        // poisoned baseline cannot warn before it has been checked. Only a
+        // warn that survives the extra source data stands; a re-judge that
+        // flips to a fail is reported as such.
+        if (cmp.warn && t != 1 && memo.warnCount < kBaselineWarnLimit) {
+            verified = true;
+            while (cmp.warn && srcRuns < maxSourceReps) {
+                int extra = std::min(retestReps, maxSourceReps - srcRuns);
+                ObservedOutcomeSet extraSet =
+                    collectOutcomeSet(origFn, extra, t);
+                srcSet = mergeOutcomeSets(srcSet, extraSet);
+                srcRuns += extra;
+                memo.baselines[baseKey] = srcSet;
+                pendingBaselines.push_back(
+                    {memo.sourceHash, baseKey, sweepReps, srcSet});
+                outcomeSet = judgeOutcomeSets(setup.runInfo.relation, srcSet,
+                                              trSet, t, thresholdPct);
+                cmp = outcomeSet.compare;
+            }
+            ++memo.warnCount;
+        }
 
-        tc.status = "done";
-        tc.ok = cmp.ok;
-        tc.warn = cmp.warn;
-        tc.message = cmp.message;
-        tc.originalRuns = srcRuns;
-        tc.transformedRuns = sweepReps;
-        tc.outcomeSet = std::move(outcomeSet);
+        setup.runInfo.threadResults.push_back(threadResultFromCompare(
+            t, cmp, srcRuns, trSet.totalRuns, std::move(outcomeSet)));
 
         if (!cmp.ok) {
             setup.runInfo.error =
@@ -876,17 +819,16 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
             setup.runInfo.warn = cmp.message;
     }
 
-    // commit the deferred baseline writes only when the run is OK; a warn or
-    // fail leaves the persistent cache untouched
-    if (setup.runInfo.error.empty() && setup.runInfo.warn.empty()) {
+    // commit the deferred baseline writes when the run is OK; a run that
+    // verified a warn (extra source data merged into the baseline) also
+    // commits, so the grown baseline is persisted whether the warn resolved
+    // or was confirmed
+    if (verified ||
+        (setup.runInfo.error.empty() && setup.runInfo.warn.empty())) {
         for (const auto &pending : pendingBaselines)
             saveBaselineCache(pending.sourceHash, pending.baseKey, pending.reps,
                               pending.set);
     }
-
-    cp.error = setup.runInfo.error;
-    cp.warn = setup.runInfo.warn;
-    saveCheckpoints();
 
     return setup.runInfo;
 }
@@ -953,8 +895,8 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
 }
 
 // core pipeline function for --run: executes each input file as-is and
-// records joint outcome frequencies per thread count. There is no
-// checkpointing or status classification.
+// records joint outcome frequencies per thread count. Each run is published
+// to the campaign folder as it completes; there is no status classification.
 ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
     ExecutionPipelineResult result;
     result.runs.reserve(opts.numRuns);
@@ -969,6 +911,9 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
             errInfo.error = "no .mlir files in " + opts.multiFolder;
             errInfo.runNumber = opts.runNumber;
             result.runs.push_back(std::move(errInfo));
+            JsonValue errArr = jsonArray();
+            jsonPush(errArr, executionRunToJson(result.runs.back()));
+            writeResultJson(errArr, gCampaignDir);
             result.campaignDir = gCampaignDir;
             return result;
         }
@@ -977,10 +922,17 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
     }
     for (size_t i = 0; i < files.size(); ++i) {
         int runSeed = opts.seed >= 0 ? opts.seed : 42;
-        result.runs.push_back(executeSingle(
+        ExecutionRunResult run = executeSingle(
             files[i], runSeed, opts.runNumber + static_cast<int>(i),
-            opts.reps));
+            opts.reps);
+        saveExecutionArtifacts(run, gCampaignDir);
+        result.runs.push_back(std::move(run));
     }
+
+    JsonValue arr = jsonArray();
+    for (const auto &run : result.runs)
+        jsonPush(arr, executionRunToJson(run));
+    writeResultJson(arr, gCampaignDir);
     result.campaignDir = gCampaignDir;
     return result;
 }
@@ -991,16 +943,13 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);
 
-    // the campaign folder is fixed by the user for resumable campaigns or
-    // timestamped otherwise; the checkpoint file lives inside it
-    gCheckpointPath.clear();
-    gCheckpoints.clear();
+    // the campaign folder is fixed by the user or timestamped otherwise;
+    // runs are added to it as they complete
     createCampaignDir(opts);
-    gCheckpointPath =
-        (std::filesystem::path(gCampaignDir) / "checkpoint.json").string();
-    CheckpointCleanup cleanup;
-
-    loadCheckpoints();
+    std::error_code ec;
+    for (const char *sub : {"fail", "warn", "ok"})
+        std::filesystem::create_directories(
+            std::filesystem::path(gCampaignDir) / sub, ec);
 
     // if multi mode is requested, collect all .mlir files in the given folder
     // if none are found return a RunInfo with an error
@@ -1011,7 +960,12 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
             RunInfo errInfo;
             errInfo.error = "no .mlir files in " + opts.multiFolder;
             errInfo.runNumber = opts.runNumber;
+            saveRunArtifacts(errInfo, "fail", gCampaignDir);
+            JsonValue errArr = jsonArray();
+            jsonPush(errArr, runInfoToJson(errInfo));
+            writeResultJson(errArr, gCampaignDir);
             result.runs.push_back(errInfo);
+            result.campaignDir = gCampaignDir;
             return result;
         }
     }
@@ -1029,51 +983,28 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
 
         // run single run and collect the RunInfo; errors and warnings are
         // carried inside the RunInfo and surfaced by the caller, not printed
-        // here. Runs and seeds are deterministic from the options, so a run
-        // whose thread levels all completed in a previous invocation is
-        // reconstructed from the checkpoint instead of being executed again.
-        std::string runKey = "run" + std::to_string(runIdx) + "_seed" +
-                             std::to_string(runSeed);
-        RunCheckpoint &cp = gCheckpoints[runKey];
-        if (cp.file.empty()) {
-            cp.file = inputFile;
-            cp.seed = runSeed;
-        }
-
-        if (allThreadsDone(cp)) {
-            RunInfo info;
-            info.runNumber = runIdx;
-            info.seed = runSeed;
-            info.file = cp.file;
-            info.requestedTransforms = cp.requestedTransforms;
-            info.transformApplied = cp.transformApplied;
-            for (size_t k = 0; k < cp.appliedTransformNames.size(); ++k)
-                info.appliedTransforms.push_back(
-                    {cp.appliedTransformNames[k],
-                     k < cp.appliedTransformTargets.size()
-                         ? cp.appliedTransformTargets[k]
-                         : std::string()});
-            for (int t : kThreadCounts) {
-                auto it = cp.threads.find(t);
-                if (it == cp.threads.end())
-                    continue;
-                info.threadResults.push_back(
-                    threadResultFromCheckpoint(t, it->second));
-            }
-            info.error = cp.error;
-            info.warn = cp.warn;
-            result.runs.push_back(std::move(info));
-            continue;
-        }
-
+        // here
         RunInfo info = runSingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
                                  opts.tsanPercent, opts.reps,
                                  opts.retestReps, opts.maxSourceReps,
-                                 opts.thresholdPct, cp);
+                                 opts.thresholdPct);
+
+        // publish the run into its status folder as it completes; each run's
+        // artifacts are written exactly once, so incremental output costs no
+        // more than a single end-of-campaign write
+        std::string status = runStatusString(info);
+        const char *statusDir = status == "ERROR" ? "fail"
+                               : status == "WARN" ? "warn" : "ok";
+        saveRunArtifacts(info, statusDir, gCampaignDir);
 
         result.runs.push_back(std::move(info));
     }
+
+    JsonValue arr = jsonArray();
+    for (const auto &run : result.runs)
+        jsonPush(arr, runInfoToJson(run));
+    writeResultJson(arr, gCampaignDir);
 
     result.campaignDir = gCampaignDir;
     return result;
@@ -1094,7 +1025,8 @@ static RunInfo emitSingle(const std::string &inputFile, int seed,
 
 // generator mode for --emit-mlir: applies the requested transforms to one
 // file or random files from a folder and returns the transformed MLIR text.
-// No campaign checkpointing or execution state is used.
+// Each run is written to the output folder as it completes; there is no
+// execution state.
 PipelineResult runEmitPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);
@@ -1125,6 +1057,12 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
             RunInfo errInfo;
             errInfo.error = "no .mlir files in " + opts.multiFolder;
             errInfo.runNumber = opts.runNumber;
+            std::string base = "run" + std::to_string(errInfo.runNumber) +
+                               "_seed" + std::to_string(errInfo.seed);
+            std::ofstream os(
+                (std::filesystem::path(result.campaignDir) /
+                 (base + ".error.txt")).string());
+            os << errInfo.error;
             result.runs.push_back(errInfo);
             return result;
         }
@@ -1139,9 +1077,17 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
                           : static_cast<int>(rng() & 0x7FFFFFFF);
         std::string inputFile =
             pickInputFile(opts, multiFiles, runIdx, runSeed);
-        result.runs.push_back(
-            emitSingle(inputFile, runSeed, runIdx, opts.transform,
-                       opts.maxApply));
+        RunInfo run = emitSingle(inputFile, runSeed, runIdx, opts.transform,
+                                 opts.maxApply);
+        std::string base = "run" + std::to_string(run.runNumber) +
+                           "_seed" + std::to_string(run.seed);
+        bool ok = run.error.empty() && !run.transformedMLIR.empty();
+        std::string suffix = ok ? ".mlir" : ".error.txt";
+        std::ofstream os(
+            (std::filesystem::path(result.campaignDir) /
+             (base + suffix)).string());
+        os << (ok ? run.transformedMLIR : run.error);
+        result.runs.push_back(std::move(run));
     }
     return result;
 }

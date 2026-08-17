@@ -19,6 +19,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <optional>
 #include <random>
 #include <string>
 #include <utility>
@@ -77,25 +78,77 @@ struct InsertPoint {
     Block *block = nullptr;
 };
 
-// Collect every legal insertion position in the region. Blocks that are direct
-// children of omp.sections regions are excluded, since those regions only
-// allow omp.section ops and a terminator. Empty blocks and blocks that do not
-// end in a terminator are included, so generated ops can also land in empty
-// bodies.
-static void collectInsertPoints(Region &region,
-                                SmallVectorImpl<InsertPoint> &points) {
+// Position the rewriter at the given insertion point.
+static void setInsertPoint(RewriterBase &rewriter, const InsertPoint &point) {
+    if (point.op)
+        rewriter.setInsertionPoint(point.op);
+    else
+        rewriter.setInsertionPointToEnd(point.block);
+}
+
+// Collect legal insertion positions inside thread regions (omp.section /
+// omp.parallel bodies). Blocks that are direct children of omp.sections
+// regions are excluded, since those regions only allow omp.section ops and a
+// terminator. Empty blocks and blocks that do not end in a terminator are
+// included, so generated ops can also land in empty bodies.
+static void collectThreadInsertPoints(Region &region, bool inThread,
+                                      SmallVectorImpl<InsertPoint> &points) {
     for (Block &block : region) {
+        bool blockInThread = inThread ||
+                             isa<omp::SectionOp>(block.getParentOp()) ||
+                             isa<omp::ParallelOp>(block.getParentOp());
         if (!isa<omp::SectionsOp>(block.getParentOp())) {
-            for (Operation &op : block)
-                points.push_back({&op, nullptr});
-            if (block.empty() ||
-                !block.back().hasTrait<OpTrait::IsTerminator>())
-                points.push_back({nullptr, &block});
+            if (blockInThread) {
+                for (Operation &op : block)
+                    points.push_back({&op, nullptr});
+                if (block.empty() ||
+                    !block.back().hasTrait<OpTrait::IsTerminator>())
+                    points.push_back({nullptr, &block});
+            }
         }
         for (Operation &op : block)
             for (Region &child : op.getRegions())
-                collectInsertPoints(child, points);
+                collectThreadInsertPoints(child, blockInThread, points);
     }
+}
+
+// Returns a random insertion point inside a thread region. When the function
+// has no thread region, a fresh omp.parallel / omp.sections / omp.section nest
+// is created at the start of the entry block, so code-inserting transforms
+// always land inside a thread.
+static InsertPoint makeThreadInsertPoint(func::FuncOp op,
+                                         RewriterBase &rewriter,
+                                         std::mt19937 &rng) {
+    SmallVector<InsertPoint> points;
+    collectThreadInsertPoints(op.getRegion(), /*inThread=*/false, points);
+    if (!points.empty()) {
+        std::uniform_int_distribution<size_t> dist(0, points.size() - 1);
+        return points[dist(rng)];
+    }
+
+    if (op.getBody().empty())
+        return {nullptr, nullptr};
+
+    Location loc = op.getLoc();
+    rewriter.setInsertionPointToStart(&op.getBody().front());
+
+    omp::ParallelOp parallel = omp::ParallelOp::create(rewriter, loc);
+    Block *parallelBody = rewriter.createBlock(&parallel.getRegion());
+    omp::SectionsOp sections =
+        omp::SectionsOp::create(rewriter, loc, TypeRange{}, ValueRange{});
+    Block *sectionsBlock = rewriter.createBlock(&sections.getRegion());
+    omp::SectionOp section = omp::SectionOp::create(rewriter, loc);
+    Block *sectionBody = rewriter.createBlock(&section.getRegion());
+    rewriter.setInsertionPointToEnd(sectionBody);
+    omp::TerminatorOp::create(rewriter, loc);
+    Operation *anchor = sectionBody->getTerminator();
+
+    rewriter.setInsertionPointToEnd(sectionsBlock);
+    omp::TerminatorOp::create(rewriter, loc);
+    rewriter.setInsertionPointToEnd(parallelBody);
+    omp::TerminatorOp::create(rewriter, loc);
+
+    return {anchor, nullptr};
 }
 
 // Collect maximal runs of consecutive ops in each block that satisfy `pred`.
@@ -301,6 +354,28 @@ private:
     std::uniform_int_distribution<int> opDist{0, 2};
 };
 
+// compose two applied relations in application order
+static mlir_mr::OutcomeRelation composeRelation(mlir_mr::OutcomeRelation a,
+                                                mlir_mr::OutcomeRelation b) {
+    if (a == mlir_mr::OutcomeRelation::Equality)
+        return b;
+    if (b == mlir_mr::OutcomeRelation::Equality)
+        return a;
+    if (a == b)
+        return a;
+    llvm_unreachable("mixing subset and superset transforms in one run");
+}
+
+// true if a transform of relation `next` may follow one of relation `cur`:
+// once a direction is fixed, only transforms preserving or extending it may
+// apply
+static bool canApplyAfter(mlir_mr::OutcomeRelation cur,
+                          mlir_mr::OutcomeRelation next) {
+    if (cur == mlir_mr::OutcomeRelation::Equality)
+        return true;
+    return cur == next;
+}
+
 }
 #define GEN_PASS_DEF_METAMORPHICPASS
 #include "MetamorphicPass.inc"
@@ -319,23 +394,49 @@ struct MetamorphicPass
 
         using Transform = bool (MetamorphicPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
 
-        // map of transform names to member function pointers
-        static const llvm::StringMap<Transform> kTransformMap = {
-            {"load-reordering", &MetamorphicPass::tryLoadReordering},
-            {"insert-fence", &MetamorphicPass::tryInsertFence},
-            // {"insert-thread", &MetamorphicPass::tryInsertThread},
-            {"insert-atomic-write", &MetamorphicPass::tryInsertAtomicWriteInThread},
-            {"local-store-duplication", &MetamorphicPass::tryLocalStoreDuplication},
-            {"try-insert-random-arith", &MetamorphicPass::tryInsertRandomArith},
-            {"try-insert-random-memref", &MetamorphicPass::tryInsertRandomMemref},
-            {"try-insert-comparison", &MetamorphicPass::tryInsertComparison},
-            {"try-insert-both-arms-if", &MetamorphicPass::tryInsertBothArmsIf},
-            {"insert-parallel", &MetamorphicPass::tryInsertParallelOp},
+        // each transform declares the outcome-set relation it preserves; the
+        // comparison direction for a run follows the composition of the
+        // transforms actually applied (see core.cpp)
+        struct TransformSpec {
+            const char *name;
+            Transform fn;
+            mlir_mr::OutcomeRelation relation;
         };
 
-        SmallVector<std::pair<std::string, Transform>, 4> transforms;
-        for (auto &kv : kTransformMap)
-            transforms.push_back({kv.getKey().str(), kv.second});
+        static const TransformSpec kTransforms[] = {
+            {"load-reordering", &MetamorphicPass::tryLoadReordering,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-fence", &MetamorphicPass::tryInsertFence,
+             mlir_mr::OutcomeRelation::Subset},
+            // {"insert-thread", &MetamorphicPass::tryInsertThread},
+            {"insert-atomic-write", &MetamorphicPass::tryInsertAtomicWriteInThread,
+             mlir_mr::OutcomeRelation::Equality},
+            {"local-store-duplication", &MetamorphicPass::tryLocalStoreDuplication,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-random-arith", &MetamorphicPass::tryInsertRandomArith,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-random-memref", &MetamorphicPass::tryInsertRandomMemref,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-comparison", &MetamorphicPass::tryInsertComparison,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-both-arms-if", &MetamorphicPass::tryInsertBothArmsIf,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-parallel", &MetamorphicPass::tryInsertParallelOp,
+             mlir_mr::OutcomeRelation::Equality},
+            {"relax-operation", &MetamorphicPass::tryRelaxOperation,
+             mlir_mr::OutcomeRelation::Superset},
+            {"restrict-operation", &MetamorphicPass::tryRestrictOperation,
+             mlir_mr::OutcomeRelation::Subset},
+            {"insert-fence-between-mem-ops", &MetamorphicPass::tryInsertFenceInbetweenMemOps,
+            mlir_mr::OutcomeRelation::Subset},
+        };
+
+        auto findSpec = [](llvm::StringRef name) -> const TransformSpec * {
+            for (const auto &spec : kTransforms)
+                if (spec.name == name)
+                    return &spec;
+            return nullptr;
+        };
 
         std::string requested = transform.getValue();
 
@@ -346,7 +447,7 @@ struct MetamorphicPass
 
         // validate every requested transform name before filtering
         for (llvm::StringRef name : requestedNames)
-            if (!kTransformMap.contains(name)) {
+            if (!findSpec(name)) {
                 if (runInfo)
                     runInfo->error = "unknown transform '" + name.str() + "'";
                 signalPassFailure();
@@ -355,13 +456,14 @@ struct MetamorphicPass
 
         // if specific transforms are requested, filter the list to only those
         // else keep the full list and pick at random
-        if (!requestedNames.empty())
-            llvm::erase_if(transforms, [&](const auto &t) {
-                return !llvm::is_contained(requestedNames, t.first);
-            });
+        SmallVector<const TransformSpec *> transforms;
+        for (const auto &spec : kTransforms)
+            if (requestedNames.empty() ||
+                llvm::is_contained(requestedNames, spec.name))
+                transforms.push_back(&spec);
         std::sort(transforms.begin(), transforms.end(),
-                  [](const auto &a, const auto &b) {
-                      return a.first < b.first;
+                  [](const TransformSpec *a, const TransformSpec *b) {
+                      return std::string(a->name) < std::string(b->name);
                   });
         if (runInfo)
             for (llvm::StringRef name : requestedNames)
@@ -373,32 +475,68 @@ struct MetamorphicPass
         if (funcs.empty())
             return;
 
-        // pick one function at random to transform
+        // pick a function at random to transform; if no transformation
+        // applies, repick a new test case (function) up to a fixed number of
+        // attempts before giving up
         std::uniform_int_distribution<size_t> dist(0, funcs.size() - 1);
-        func::FuncOp target = funcs[dist(rng)];
+        constexpr int kMaxTransformAttempts = 3;
+        llvm::DenseSet<func::FuncOp> tried;
+        for (int attempt = 0; attempt < kMaxTransformAttempts; ++attempt) {
+            func::FuncOp target;
+            do {
+                target = funcs[dist(rng)];
+            } while (tried.contains(target) && tried.size() < funcs.size());
+            tried.insert(target);
 
-        int transformCounter = 0;
+            int transformCounter = 0;
+            std::optional<mlir_mr::OutcomeRelation> aggregate;
 
-        // keep applying random transformations until max applications is reached
-        while (transformCounter < maxApply) {
-            std::shuffle(transforms.begin(), transforms.end(), rng);
+            // keep applying random transformations until max applications is
+            // reached; transforms whose relation would contradict the direction
+            // already established are excluded from the draw
+            while (transformCounter < maxApply) {
+                SmallVector<const TransformSpec *> allowed;
+                for (const TransformSpec *spec : transforms)
+                    if (canApplyAfter(
+                            aggregate.value_or(mlir_mr::OutcomeRelation::Equality),
+                            spec->relation))
+                        allowed.push_back(spec);
+                if (allowed.empty())
+                    break;
 
-            bool applied = false;
-            for (auto &t : transforms)
-                if ((this->*t.second)(target, rewriter, rng)) {
-                    transformCounter++;
-                    if (runInfo) {
-                        runInfo->appliedTransforms.push_back(
-                            {t.first, target.getName().str()});
-                        runInfo->transformApplied = true;
+                std::shuffle(allowed.begin(), allowed.end(), rng);
+                bool applied = false;
+                for (const TransformSpec *spec : allowed)
+                    if ((this->*spec->fn)(target, rewriter, rng)) {
+                        transformCounter++;
+                        aggregate =
+                            aggregate
+                                ? composeRelation(*aggregate, spec->relation)
+                                : spec->relation;
+                        if (runInfo) {
+                            runInfo->appliedTransforms.push_back(
+                                {spec->name, target.getName().str()});
+                            runInfo->transformApplied = true;
+                        }
+                        applied = true;
+                        break;
                     }
-                    applied = true;
+
+                if (!applied)
                     break;
                 }
 
-            if (!applied)
-                break;
+            if (aggregate) {
+                if (runInfo)
+                    runInfo->relation = *aggregate;
+                return;
+            }
         }
+
+        if (runInfo)
+            runInfo->error = "tried applying transformation " +
+                             std::to_string(kMaxTransformAttempts) + " times";
+        signalPassFailure();
     }
 
 private:
@@ -443,13 +581,15 @@ private:
                 return isa<memref::LoadOp>(innerOp);
             });
         for (SmallVector<Operation *> &run : loadRuns) {
-            // the whole block shares one thread context
+            // only reorder loads that actually run inside a thread region
             bool inThread =
                 funcInThread || isOpInThread(&run.front()->getBlock()->front());
+            if (!inThread)
+                continue;
             SmallVector<memref::LoadOp> loads;
             for (Operation *load : run)
                 loads.push_back(cast<memref::LoadOp>(load));
-            if (checkLoadRun(loads, inThread))
+            if (checkLoadRun(loads, /*requireLocalMemrefs=*/true))
                 eligibleRuns.push_back(std::move(loads));
         }
 
@@ -482,23 +622,13 @@ private:
         return true;
     }
 
-    // TODO: subset relation
-    // randomly insert an omp.flush fence at a random point in the function
+    // randomly insert an omp.flush fence inside a thread region, creating a
+    // thread region when none exists
     bool tryInsertFence(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-        SmallVector<InsertPoint> points;
-
-        collectInsertPoints(op.getRegion(), points);
-
-        if (points.empty())
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
             return false;
-
-        std::uniform_int_distribution<size_t> dist(0, points.size() - 1);
-        InsertPoint point = points[dist(rng)];
-
-        if (point.op)
-            rewriter.setInsertionPoint(point.op);
-        else
-            rewriter.setInsertionPointToEnd(point.block);
+        setInsertPoint(rewriter, point);
         omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
         return true;
     }
@@ -545,28 +675,12 @@ private:
 //    }
 
     bool tryInsertAtomicWriteInThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-        SmallVector<omp::SectionOp> candidates;
-
-        // Walk to find all omp.section ops in the function body
-        op.getBody().walk([&](Operation *innerOp) {
-            if (auto sectionOp = dyn_cast<omp::SectionOp>(innerOp)) {
-                candidates.push_back(sectionOp);
-            }
-        });
-
-        if (candidates.empty())
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
             return false;
+        setInsertPoint(rewriter, point);
 
-        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
-        omp::SectionOp section = candidates[dist(rng)];
-
-        if (section.getRegion().empty())
-            return false;
-
-        // Insert into the section body, before its terminator.
-        rewriter.setInsertionPoint(section.getRegion().front().getTerminator());
-
-        Location loc = section.getLoc();
+        Location loc = op.getLoc();
 
         // Dummy 0-d memref on this thread's stack and an atomic write of 0 to
         // it: a no-op that still exercises the atomic memory path.
@@ -652,45 +766,26 @@ private:
         return true;
     }
 
-    // Randomly insert a fresh memref and a chain of arith ops
-    // Keep going until max chain length of 5 is hit, or a store is inserted back to the memref, which stops the chain
+    // Randomly insert a fresh memref and a chain of arith ops inside a thread
+    // region, creating one when none exists
     bool tryInsertRandomArith(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-        SmallVector<InsertPoint> points;
-
-        collectInsertPoints(op.getRegion(), points);
-
-        if (points.empty())
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
             return false;
-
-        std::uniform_int_distribution<size_t> dist(0, points.size() - 1);
-        InsertPoint point = points[dist(rng)];
-
-        if (point.op)
-            rewriter.setInsertionPoint(point.op);
-        else
-            rewriter.setInsertionPointToEnd(point.block);
+        setInsertPoint(rewriter, point);
 
         ArithGenerator(rng).generate(rewriter, op.getLoc());
 
         return true;
     }
 
-    // Randomly insert a fresh memref and a chain of loads/stores to it
+    // Randomly insert a fresh memref and a chain of loads/stores to it inside
+    // a thread region, creating one when none exists
     bool tryInsertRandomMemref(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-        SmallVector<InsertPoint> points;
-
-        collectInsertPoints(op.getRegion(), points);
-
-        if (points.empty())
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
             return false;
-
-        std::uniform_int_distribution<size_t> dist(0, points.size() - 1);
-        InsertPoint point = points[dist(rng)];
-
-        if (point.op)
-            rewriter.setInsertionPoint(point.op);
-        else
-            rewriter.setInsertionPointToEnd(point.block);
+        setInsertPoint(rewriter, point);
 
         ArithGenerator(rng).generateMemref(rewriter, op.getLoc());
 
@@ -746,12 +841,15 @@ private:
         // the other arm
         SmallVector<SmallVector<Operation *>> chains =
             collectOpRuns(op, [](Operation *innerOp) {
-                return innerOp->getParentOfType<omp::SectionOp>() &&
+                omp::SectionOp sectionOp =
+                    innerOp->getParentOfType<omp::SectionOp>();
+                return sectionOp &&
+                       innerOp->getParentOp() == sectionOp.getOperation() &&
                        isWrappable(innerOp) &&
                        llvm::all_of(innerOp->getResults(),
                                     [](Value r) { return r.use_empty(); }) &&
                        !isa<omp::BarrierOp, omp::FlushOp, omp::SectionsOp,
-                            omp::ParallelOp>(innerOp);
+                            omp::ParallelOp, omp::AtomicCompareOp>(innerOp);
             });
 
         if (!chains.empty()) {
@@ -796,25 +894,15 @@ private:
             return true;
         }
 
-        // fallback: a random memref/arith chain in both arms of a random
-        // non-empty section
-        SmallVector<omp::SectionOp> sections;
-        op.getBody().walk([&](omp::SectionOp sectionOp) {
-            if (!sectionOp.getRegion().empty() &&
-                !sectionOp.getRegion().front().empty())
-                sections.push_back(sectionOp);
-        });
-        if (sections.empty())
+        // fallback: a random memref/arith chain in both arms of an scf.if
+        // inside a thread region, creating one when none exists
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
             return false;
-
-        std::uniform_int_distribution<size_t> dist(0, sections.size() - 1);
-        Block &sectionBlock = sections[dist(rng)].getRegion().front();
-        Operation *anchor = sectionBlock.getTerminator();
-        if (!anchor)
-            return false;
-
-        rewriter.setInsertionPoint(anchor);
-        Value cond = makeRuntimeCondition(anchor, rewriter, loc, rng);
+        Operation *anchor = point.op ? point.op : point.block->getTerminator();
+        setInsertPoint(rewriter, point);
+        Value cond = anchor ? makeRuntimeCondition(anchor, rewriter, loc, rng)
+                            : Value{};
         if (!cond)
             cond = arith::ConstantOp::create(
                 rewriter, loc, rewriter.getI1Type(),
@@ -877,23 +965,26 @@ private:
         return true;
     }
 
-    // Insert a new omp.parallel right after a randomly chosen existing one.
-    // The new parallel contains an omp.sections with a random number of
-    // omp.section bodies, each filled with the combined arith/memref chain.
+    // Insert a new omp.parallel after a randomly chosen existing one, or at
+    // the start of the entry block when none exists. The new parallel contains
+    // an omp.sections with a random number of omp.section bodies, each filled
+    // with the combined arith/memref chain.
     bool tryInsertParallelOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        if (op.getBody().empty())
+            return false;
+
         SmallVector<omp::ParallelOp> candidates;
         op.getBody().walk([&](omp::ParallelOp parallel) {
             candidates.push_back(parallel);
         });
 
-        if (candidates.empty())
-            return false;
-
-        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
-        omp::ParallelOp anchor = candidates[dist(rng)];
-
-        rewriter.setInsertionPointAfter(anchor);
-        Location loc = anchor.getLoc();
+        if (!candidates.empty()) {
+            std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+            rewriter.setInsertionPointAfter(candidates[dist(rng)]);
+        } else {
+            rewriter.setInsertionPointToStart(&op.getBody().front());
+        }
+        Location loc = op.getLoc();
 
         omp::ParallelOp parallel = omp::ParallelOp::create(rewriter, loc);
         Block *parallelBody = rewriter.createBlock(&parallel.getRegion());
@@ -998,6 +1089,163 @@ private:
 
         return unrolled;
     }
+
+    // Relax the memory order of a randomly chosen atomic op by exactly one
+    // stage. Only ops that can actually be weakened are candidates: an op
+    // already at the weakest order (relaxed) has no successor and is skipped.
+    bool tryRelaxOperation(func::FuncOp op, RewriterBase &rewriter,
+                           std::mt19937 &rng) {
+        // Valid one-stage weakening chains per op kind, strongest first.
+        // Orders outside the chain (e.g. acquire on a write) cannot be
+        // weakened meaningfully and are left alone.
+        auto nextWeakerOrder = [](Operation *innerOp,
+                                  omp::ClauseMemoryOrderKind order)
+            -> std::optional<omp::ClauseMemoryOrderKind> {
+            if (isa<omp::AtomicWriteOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Seq_cst:
+                    return omp::ClauseMemoryOrderKind::Release;
+                case omp::ClauseMemoryOrderKind::Release:
+                    return omp::ClauseMemoryOrderKind::Relaxed;
+                default:
+                    return std::nullopt;
+                }
+            }
+            if (isa<omp::AtomicReadOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Seq_cst:
+                    return omp::ClauseMemoryOrderKind::Acquire;
+                case omp::ClauseMemoryOrderKind::Acquire:
+                    return omp::ClauseMemoryOrderKind::Relaxed;
+                default:
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        };
+
+        SmallVector<std::pair<Operation *, omp::ClauseMemoryOrderKind>>
+            candidates;
+        op.getBody().walk([&](Operation *innerOp) {
+            std::optional<omp::ClauseMemoryOrderKind> order;
+            if (auto write = dyn_cast<omp::AtomicWriteOp>(innerOp))
+                order = write.getMemoryOrder();
+            else if (auto read = dyn_cast<omp::AtomicReadOp>(innerOp))
+                order = read.getMemoryOrder();
+            else
+                return;
+
+            // memory_order defaults to seq_cst when not specified
+            omp::ClauseMemoryOrderKind current =
+                order.value_or(omp::ClauseMemoryOrderKind::Seq_cst);
+            if (auto weaker = nextWeakerOrder(innerOp, current))
+                candidates.push_back({innerOp, *weaker});
+        });
+
+        if (candidates.empty())
+            return false;
+        
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        auto [opToRelax, weakerOrder] = candidates[dist(rng)];
+
+        if (auto write = dyn_cast<omp::AtomicWriteOp>(opToRelax))
+            write.setMemoryOrder(weakerOrder);
+        else if (auto read = dyn_cast<omp::AtomicReadOp>(opToRelax))
+            read.setMemoryOrder(weakerOrder);
+
+        return true;
+    }
+
+    bool tryRestrictOperation(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        // Valid one-stage weakening chains per op kind, strongest first.
+        // Orders outside the chain (e.g. acquire on a write) cannot be
+        // weakened meaningfully and are left alone.
+        auto nextStrongerOrder = [](Operation *innerOp,
+                                  omp::ClauseMemoryOrderKind order)
+            -> std::optional<omp::ClauseMemoryOrderKind> {
+            if (isa<omp::AtomicWriteOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Relaxed:
+                    return omp::ClauseMemoryOrderKind::Release;
+                case omp::ClauseMemoryOrderKind::Release:
+                    return omp::ClauseMemoryOrderKind::Seq_cst;
+                default:
+                    return std::nullopt;
+                }
+            }
+            if (isa<omp::AtomicReadOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Relaxed:
+                    return omp::ClauseMemoryOrderKind::Acquire;
+                case omp::ClauseMemoryOrderKind::Acquire:
+                    return omp::ClauseMemoryOrderKind::Seq_cst;
+                default:
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        };
+
+        SmallVector<std::pair<Operation *, omp::ClauseMemoryOrderKind>>
+            candidates;
+        op.getBody().walk([&](Operation *innerOp) {
+            std::optional<omp::ClauseMemoryOrderKind> order;
+            if (auto write = dyn_cast<omp::AtomicWriteOp>(innerOp))
+                order = write.getMemoryOrder();
+            else if (auto read = dyn_cast<omp::AtomicReadOp>(innerOp))
+                order = read.getMemoryOrder();
+            else
+                return;
+
+            // memory_order defaults to seq_cst when not specified
+            omp::ClauseMemoryOrderKind current =
+                order.value_or(omp::ClauseMemoryOrderKind::Seq_cst);
+            if (auto stronger = nextStrongerOrder(innerOp, current))
+                candidates.push_back({innerOp, *stronger});
+        });
+
+        if (candidates.empty())
+            return false;
+        
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        auto [opToRestrict, strongerOrder] = candidates[dist(rng)];
+
+        if (auto write = dyn_cast<omp::AtomicWriteOp>(opToRestrict))
+            write.setMemoryOrder(strongerOrder);
+        else if (auto read = dyn_cast<omp::AtomicReadOp>(opToRestrict))
+            read.setMemoryOrder(strongerOrder);
+
+        return true;
+    }
+
+    // ARMv8 TRANSFORMS BELOW
+    
+    bool tryInsertFenceInbetweenMemOps(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        // get chains of consecutive atomic writes and reads in threads
+        SmallVector<SmallVector<Operation *>> chains =
+            collectOpRuns(op, [](Operation *innerOp) {
+                return isOpInThread(innerOp) &&
+                       (isa<omp::AtomicWriteOp>(innerOp) ||
+                        isa<omp::AtomicReadOp>(innerOp));
+            });
+        
+        // only consider chains of length >= 2, as we need to insert a fence inbetween two ops
+        llvm::erase_if(chains, [](const SmallVector<Operation *> &chain) {
+            return chain.size() < 2;
+        });
+
+        if (chains.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, chains.size() - 1);
+        SmallVector<Operation *> &chain = chains[dist(rng)];
+
+        rewriter.setInsertionPointAfter(chain[0]);
+        omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
+        return true;
+    }
+
+    bool 
 };
 
 std::unique_ptr<Pass> createMetamorphicPass(

@@ -10,6 +10,16 @@
 
 namespace mlir_mr {
 
+// Direction of the outcome-set relation the comparison enforces. Equality
+// judges the whole union of both outcome sets; Subset only judges outcomes
+// the transformed side adds; Superset only judges outcomes the transformed
+// side drops.
+enum class OutcomeRelation { Equality, Subset, Superset };
+
+std::string outcomeRelationToString(OutcomeRelation relation);
+bool outcomeRelationFromString(const std::string &s,
+                               OutcomeRelation &relation);
+
 // A single metamorphic transformation applied during a run.
 // Used for logging and reporting in RunInfo.
 struct AppliedTransformation {
@@ -63,6 +73,7 @@ struct RunInfo {
     std::vector<AppliedTransformation> appliedTransforms;
     std::vector<ThreadGroupResult> threadResults;
     bool transformApplied = false;
+    OutcomeRelation relation = OutcomeRelation::Equality;
     std::string error;
     std::string warn;
     // artifacts captured during the run; saved under results/<status>/ for

@@ -13,15 +13,12 @@ module {
     omp.parallel {
       omp.sections {
         omp.section {
-          // P0: r0 = 0;
-          //     CAS(x, &r0, 2, relaxed, relaxed)
-          %r0_mem = memref.alloca() : memref<1xi64>
-          memref.store %c0_i64, %r0_mem[%c0] : memref<1xi64>
-          omp.atomic.read %r0_mem = %x memory_order(relaxed) : memref<1xi64>, memref<1xi64>, i64
-          %r0 = memref.load %r0_mem[%c0] : memref<1xi64>
-          %match = arith.cmpi eq, %r0, %c0_i64 : i64
-          scf.if %match {
-            omp.atomic.write %x = %c2_i64 memory_order(relaxed) : memref<1xi64>, i64
+          // P0: CAS(x, &r0, 2, relaxed, relaxed)
+          omp.atomic.compare memory_order(relaxed) %x : memref<1xi64> {
+          ^bb0(%xval: i64):
+            %cmp = arith.cmpi eq, %xval, %c0_i64 : i64
+            %sel = arith.select %cmp, %c2_i64, %xval : i64
+            omp.yield (%sel : i64)
           }
           omp.terminator
         }

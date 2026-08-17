@@ -207,6 +207,11 @@ def main():
         "--opt-level", type=int, default=1,
         help="optimisation level for mlir-mr targets (default 1)"
     )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="disable the persistent on-disk cache (no state survives "
+             "between invocations)"
+    )
     args = parser.parse_args()
 
     if args.file and args.multi:
@@ -271,9 +276,10 @@ def main():
         cmd.append(args.file)
 
     # pin the cache root so every invocation shares the project baseline
-    # cache regardless of the working directory
+    # cache regardless of the working directory; --no-cache passes an empty
+    # value, which the tool treats as "no disk caching"
     env = dict(os.environ)
-    env["MLIR_MR_CACHE_DIR"] = str(CACHE_DIR / "v2")
+    env["MLIR_MR_CACHE_DIR"] = "" if args.no_cache else str(CACHE_DIR / "v2")
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sanitizer_hits = scan_sanitizer_output(result.stderr)
 

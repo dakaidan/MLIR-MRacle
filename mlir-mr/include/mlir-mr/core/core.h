@@ -21,14 +21,14 @@ struct PipelineOptions {
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
     int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
-    std::string campaignDir;  // resume/continue an existing campaign log folder
+    std::string campaignDir;  // output folder; runs are added as they complete
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
     int maxSourceReps = 100000; // hard cap for source runs per baseline
     int thresholdPct = 5; // transformed-only outcomes at/above this % fail, below warn
 };
 
-// schema version shared by checkpoint files
-inline constexpr int kResultSchemaVersion = 7;
+// schema version embedded in persistent baseline-cache keys and prefixes
+inline constexpr int kResultSchemaVersion = 8;
 
 struct PipelineResult {
     std::vector<RunInfo> runs;

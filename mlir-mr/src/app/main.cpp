@@ -1,82 +1,8 @@
 #include "mlir-mr/core/core.h"
-#include "mlir-mr/io/io.h"
-
-#include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <cmath>
-#include <algorithm>
-
-namespace {
-
-// writes the artifacts of a single run under <campaignDir>/<status>/run<N>_seed<S>/
-void saveArtifacts(const mlir_mr::RunInfo &run, const std::string &status,
-                   const std::string &campaignDir) {
-    std::filesystem::path dir =
-        std::filesystem::path(campaignDir) / status /
-        ("run" + std::to_string(run.runNumber) + "_seed" +
-         std::to_string(run.seed));
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-
-    auto writeIfNonEmpty = [&](const std::string &name,
-                               const std::string &content) {
-        if (content.empty())
-            return;
-        std::ofstream os((dir / name).string());
-        os << content;
-    };
-    writeIfNonEmpty("source.mlir", run.sourceMLIR);
-    writeIfNonEmpty("transformed.mlir", run.transformedMLIR);
-    writeIfNonEmpty("lowered.mlir", run.loweredMLIR);
-    writeIfNonEmpty("transformed.ll", run.jitLLVM);
-    writeIfNonEmpty("source.ll", run.sourceJitLLVM);
-    writeIfNonEmpty("module.bc", run.bitcode);
-
-    std::string infoBuf;
-    llvm::raw_string_ostream infoOs(infoBuf);
-    mlir_mr::printJson(mlir_mr::runInfoToStatusJson(run), infoOs);
-    infoOs << "\n";
-    infoOs.flush();
-    std::ofstream infoFile((dir / "run_info.json").string());
-    infoFile << infoBuf;
-}
-
-// writes the .ll artifact of one execution-mode run under
-// <campaignDir>/run<N>_seed<S>/
-void saveExecutionArtifacts(const mlir_mr::ExecutionRunResult &run,
-                            const std::string &campaignDir) {
-    if (run.llvmIR.empty())
-        return;
-    std::filesystem::path dir =
-        std::filesystem::path(campaignDir) /
-        ("run" + std::to_string(run.runNumber) + "_seed" +
-         std::to_string(run.seed));
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    std::ofstream os((dir / "source.ll").string());
-    os << run.llvmIR;
-}
-
-// writes the campaign's result.json
-void writeResultJson(const mlir_mr::JsonValue &arr,
-                     const std::string &campaignDir) {
-    std::filesystem::path logPath =
-        std::filesystem::path(campaignDir) / "result.json";
-    std::string logBuf;
-    llvm::raw_string_ostream logOs(logBuf);
-    mlir_mr::printJson(arr, logOs);
-    logOs << "\n";
-    logOs.flush();
-    std::ofstream logFile(logPath.string());
-    logFile << logBuf;
-}
-
-} // namespace
 
 int main(int argc, char **argv) {
     // Pin the OpenMP runtime to a fixed configuration before any parallel
@@ -182,16 +108,6 @@ int main(int argc, char **argv) {
         // picked and applied; --iter remains the repetition count elsewhere
         opts.numRuns = opts.reps;
         mlir_mr::PipelineResult result = mlir_mr::runEmitPipeline(opts);
-        for (const auto &run : result.runs) {
-            std::string base = "run" + std::to_string(run.runNumber) +
-                               "_seed" + std::to_string(run.seed);
-            bool ok = run.error.empty() && !run.transformedMLIR.empty();
-            std::string suffix = ok ? ".mlir" : ".error.txt";
-            std::ofstream os(
-                (std::filesystem::path(result.campaignDir) /
-                 (base + suffix)).string());
-            os << (ok ? run.transformedMLIR : run.error);
-        }
         std::cout << result.campaignDir << "\n";
         mlir_mr::shutdownCore();
         return 0;
@@ -200,37 +116,12 @@ int main(int argc, char **argv) {
     if (opts.straightMode) {
         mlir_mr::ExecutionPipelineResult result =
             mlir_mr::runExecutionPipeline(opts);
-        for (const auto &run : result.runs)
-            saveExecutionArtifacts(run, result.campaignDir);
-        mlir_mr::JsonValue arr = mlir_mr::jsonArray();
-        for (const auto &run : result.runs)
-            mlir_mr::jsonPush(arr, mlir_mr::executionRunToJson(run));
-        writeResultJson(arr, result.campaignDir);
         std::cout << result.campaignDir << "\n";
         mlir_mr::shutdownCore();
         return 0;
     }
 
     mlir_mr::PipelineResult result = mlir_mr::runPipeline(opts);
-
-    std::error_code ec;
-    for (const char *sub : {"fail", "warn", "ok"})
-        std::filesystem::create_directories(
-            std::filesystem::path(result.campaignDir) / sub, ec);
-
-    mlir_mr::JsonValue arr = mlir_mr::jsonArray();
-    for (const auto &run : result.runs) {
-        mlir_mr::jsonPush(arr, mlir_mr::runInfoToJson(run));
-        std::string status = mlir_mr::runStatusString(run);
-        if (status == "ERROR")
-            saveArtifacts(run, "fail", result.campaignDir);
-        else if (status == "WARN")
-            saveArtifacts(run, "warn", result.campaignDir);
-        else
-            saveArtifacts(run, "ok", result.campaignDir);
-    }
-
-    writeResultJson(arr, result.campaignDir);
     std::cout << result.campaignDir << "\n";
     mlir_mr::shutdownCore();
     return 0;

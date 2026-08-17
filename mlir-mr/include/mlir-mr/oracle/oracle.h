@@ -43,4 +43,25 @@ OutcomeSetResult compareOutcomeSets(const ObservedOutcomeSet &source,
                                     const ObservedOutcomeSet &transformed,
                                     int numThreads, int thresholdPct);
 
+// Subset-direction comparison: the transformed outcome set must be a subset
+// of the source outcome set, so only outcomes the transformed side adds are
+// judged. Missing source outcomes are allowed. A transformed-only outcome at
+// or above thresholdPct percent of transformed runs fails; one below the
+// threshold but beyond the Poisson bound of a single chance occurrence warns.
+// The 1-thread determinism check is shared with compareOutcomeSets.
+OutcomeSetResult compareOutcomeSetsSubset(
+    const ObservedOutcomeSet &source, const ObservedOutcomeSet &transformed,
+    int numThreads, int thresholdPct);
+
+// Superset-direction comparison: the transformed outcome set must be a
+// superset of the source outcome set, so only outcomes the transformed side
+// drops are judged. Extra transformed outcomes are allowed. A source outcome
+// produced at or above thresholdPct percent of source runs that is absent
+// from the transformed set fails; a rarer source outcome whose absence is
+// statistically significant warns. The 1-thread determinism check is shared
+// with compareOutcomeSets.
+OutcomeSetResult compareOutcomeSetsSuperset(
+    const ObservedOutcomeSet &source, const ObservedOutcomeSet &transformed,
+    int numThreads, int thresholdPct);
+
 } // namespace mlir_mr

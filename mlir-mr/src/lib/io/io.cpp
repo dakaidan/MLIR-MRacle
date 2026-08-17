@@ -339,6 +339,12 @@ std::string runMessage(const RunInfo &info) {
     return info.error;
 }
 
+JsonValue relationToJson(OutcomeRelation relation) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "type", jsonString(outcomeRelationToString(relation)));
+    return obj;
+}
+
 } // namespace
 
 JsonValue runInfoToJson(const RunInfo &info) {
@@ -346,6 +352,7 @@ JsonValue runInfoToJson(const RunInfo &info) {
     jsonPut(obj, "run", jsonInt(info.runNumber));
     jsonPut(obj, "file", jsonString(info.file));
     jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
+    jsonPut(obj, "relation", relationToJson(info.relation));
 
     std::string status = runStatusString(info);
     jsonPut(obj, "status", jsonString(status));
@@ -376,6 +383,7 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
     jsonPut(obj, "run", jsonInt(info.runNumber));
     jsonPut(obj, "file", jsonString(info.file));
     jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
+    jsonPut(obj, "relation", relationToJson(info.relation));
 
     std::string status = runStatusString(info);
     jsonPut(obj, "status", jsonString(status));
