@@ -2,6 +2,8 @@ add_subdirectory(backend)
 add_subdirectory(passes)
 add_subdirectory(context)
 add_subdirectory(oracle)
+add_subdirectory(agitation)
+add_subdirectory(execution)
 add_subdirectory(io)
 add_subdirectory(core)
 
@@ -21,6 +23,8 @@ target_link_libraries(mlir_mr INTERFACE
     mlir_mr_passes
     mlir_mr_context
     mlir_mr_oracle
+    mlir_mr_agitation
+    mlir_mr_execution
     mlir_mr_io
     mlir_mr_core
 )

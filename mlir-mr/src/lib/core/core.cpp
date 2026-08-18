@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <set>
 
 namespace mlir_mr {
 

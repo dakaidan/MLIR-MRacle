@@ -158,18 +158,25 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error,
     bool enableTsan,
-    int jitOptLevel) {
+    int jitOptLevel,
+    llvm::BasicBlockSection bbSections) {
 
     if (error)
         error->clear();
     initNativeTarget();
 
     llvm::orc::LLJITBuilder builder;
-    if (jitOptLevel >= 0) {
+    if (jitOptLevel >= 0 || bbSections != llvm::BasicBlockSection::None) {
         auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost();
         if (jtmb) {
-            jtmb->setCodeGenOptLevel(
-                static_cast<llvm::CodeGenOptLevel>(jitOptLevel));
+            if (jitOptLevel >= 0)
+                jtmb->setCodeGenOptLevel(
+                    static_cast<llvm::CodeGenOptLevel>(jitOptLevel));
+            if (bbSections != llvm::BasicBlockSection::None) {
+                auto opts = jtmb->getOptions();
+                opts.BBSections = bbSections;
+                jtmb->setOptions(opts);
+            }
             builder.setJITTargetMachineBuilder(std::move(*jtmb));
         }
     }
