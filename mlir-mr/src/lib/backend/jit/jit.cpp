@@ -3,6 +3,7 @@
 
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/Core.h"
+#include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -12,6 +13,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
@@ -155,13 +157,23 @@ static void addResultCaptureFunction(llvm::Module &module) {
 std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error,
-    bool enableTsan) {
+    bool enableTsan,
+    int jitOptLevel) {
 
     if (error)
         error->clear();
     initNativeTarget();
 
-    auto jitOrErr = llvm::orc::LLJITBuilder().create();
+    llvm::orc::LLJITBuilder builder;
+    if (jitOptLevel >= 0) {
+        auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost();
+        if (jtmb) {
+            jtmb->setCodeGenOptLevel(
+                static_cast<llvm::CodeGenOptLevel>(jitOptLevel));
+            builder.setJITTargetMachineBuilder(std::move(*jtmb));
+        }
+    }
+    auto jitOrErr = builder.create();
     if (!jitOrErr) {
         if (error)
             *error = "failed to create JIT: " +
@@ -220,9 +232,11 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
 
 // actual execution of the JIT'd code, with error handling
 int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
-                             mlir_mr::RunInfo *runInfo) {
+                             mlir_mr::RunInfo *runInfo,
+                             int jitOptLevel) {
     std::string error;
-    auto fn = compileLLVMModuleToFunction(std::move(llvmModule), &error);
+    auto fn = compileLLVMModuleToFunction(std::move(llvmModule), &error,
+                                          false, jitOptLevel);
     if (!fn) {
         if (runInfo)
             runInfo->error = error;

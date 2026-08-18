@@ -90,7 +90,7 @@ def cached_binary_path(opt_level, sanitizers):
     return EXECUTABLE_CACHE_DIR / f"opt{opt_level}_{label}_{digest}" / BINARY_NAME
 
 
-def build_binary(opt_level=1, sanitizers="thread"):
+def build_binary(opt_level=2, sanitizers="thread"):
     cmake = shutil.which("cmake")
     if not cmake:
         sys.exit("cmake not found in PATH")
@@ -204,8 +204,8 @@ def main():
     )
     parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mr_opt")
     parser.add_argument(
-        "--opt-level", type=int, default=1,
-        help="optimisation level for mlir-mr targets (default 1)"
+        "--opt-level", type=int, default=3,
+        help="optimisation level for JIT'd programs (default 3)"
     )
     parser.add_argument(
         "--no-cache", action="store_true",
@@ -241,7 +241,7 @@ def main():
     binary = Path(args.binary) if args.binary else find_binary(sanitizers)
     if not binary:
         print(f"{BINARY_NAME} not found; building...", file=sys.stderr)
-        binary = build_binary(args.opt_level, sanitizers)
+        binary = build_binary(sanitizers=sanitizers)
 
     cmd = [str(binary)]
     if args.seed is not None:
@@ -258,6 +258,7 @@ def main():
         cmd.append(f"--iter={args.iter}")
         cmd.append(f"--apply={args.apply}")
         cmd.append(f"--tsan={args.tsan}")
+        cmd.append(f"--jit-opt-level={args.opt_level}")
         cmd.append(f"--threshold={args.threshold}")
         cmd.append(f"--reruns={args.reruns}")
         cmd.append(f"--max-runs={args.max_runs}")

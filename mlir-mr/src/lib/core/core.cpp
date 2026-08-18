@@ -532,7 +532,8 @@ static void clearBaseline(SourceMemo &memo, const std::string &baseKey,
 // processes of the same source skip lowering and translation entirely
 static bool memoizeSource(mlir::MLIRContext &mlirCtx,
                           mlir::ModuleOp module, const std::string &sourceMLIR,
-                          SourceMemo &memo, std::string &error) {
+                          SourceMemo &memo, std::string &error,
+                          int jitOptLevel) {
     memo.tsan = nullptr;
     memo.plain = nullptr;
     memo.tsanModule.reset();
@@ -557,7 +558,8 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
     memo.tsanModule = std::move(llvmModule);
     std::string compileError;
     memo.plain = compileLLVMModuleToFunction(
-        llvm::CloneModule(*memo.tsanModule), &compileError, false);
+        llvm::CloneModule(*memo.tsanModule), &compileError, false,
+        jitOptLevel);
     if (!memo.plain) {
         error = "JIT compile error (original): " + compileError;
         return false;
@@ -568,7 +570,8 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
 // returns the TSan-instrumented source binary, compiling it on first use and
 // keeping it alive for later runs of the same file
 static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
-                                                              std::string &error) {
+                                                              std::string &error,
+                                                              int jitOptLevel) {
     if (memo.tsan)
         return memo.tsan;
     if (!memo.tsanModule) {
@@ -577,7 +580,7 @@ static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
     }
     std::string compileError;
     memo.tsan = compileLLVMModuleToFunction(std::move(memo.tsanModule),
-                                            &compileError, true);
+                                            &compileError, true, jitOptLevel);
     if (!memo.tsan)
         memo.tsanError = "JIT compile error (original): " + compileError;
     if (memo.tsan)
@@ -591,7 +594,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
                          int maxApply, int tsanPercent, int reps,
                          int retestReps, int maxSourceReps,
-                         int thresholdPct) {
+                         int thresholdPct, int jitOptLevel) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     std::vector<PendingBaseline> pendingBaselines;
 
@@ -636,7 +639,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         SourceMemo fresh;
         if (!memoizeSource(setup.mlirContext, *originalModule,
                            setup.runInfo.sourceMLIR, fresh,
-                           setup.runInfo.error))
+                           setup.runInfo.error, jitOptLevel))
             return setup.runInfo;
         memo = std::move(fresh);
     }
@@ -658,7 +661,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // always compiled plain so the deterministic single-thread check runs
     // first without paying for instrumentation it does not need.
     auto transfPlain = compileLLVMModuleToFunction(
-        llvm::CloneModule(*moduleToTransformLLVM), &compileError, false);
+        llvm::CloneModule(*moduleToTransformLLVM), &compileError, false,
+        jitOptLevel);
     if (!transfPlain) {
         setup.runInfo.error =
             "JIT compile error (transformed): " + compileError;
@@ -667,13 +671,14 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
 
     std::function<std::vector<int64_t>()> origTsan, transfTsan;
     if (useTsan) {
-        origTsan = sourceTsanBinary(memo, compileError);
+        origTsan = sourceTsanBinary(memo, compileError, jitOptLevel);
         if (!origTsan) {
             setup.runInfo.error = compileError;
             return setup.runInfo;
         }
         transfTsan = compileLLVMModuleToFunction(
-            llvm::CloneModule(*moduleToTransformLLVM), &compileError, true);
+            llvm::CloneModule(*moduleToTransformLLVM), &compileError, true,
+            jitOptLevel);
         if (!transfTsan) {
             setup.runInfo.error =
                 "JIT compile error (transformed): " + compileError;
@@ -703,7 +708,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         // and never touches the cache.
         bool tsanVariant = t != 1 && useTsan;
         std::string baseKey =
-            std::to_string(t) + (tsanVariant ? ":tsan" : "");
+            std::to_string(t) + ":o" + std::to_string(jitOptLevel) +
+            (tsanVariant ? ":tsan" : "");
         int srcRuns;
         ObservedOutcomeSet srcSet;
         if (t == 1) {
@@ -837,7 +843,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
 // every team size without any transformation or comparison. Joint outcome
 // frequencies are recorded per thread count.
 static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
-                                        int runIdx, int reps) {
+                                        int runIdx, int reps,
+                                        int jitOptLevel) {
     ExecutionRunResult result;
     result.runNumber = runIdx;
     result.seed = seed;
@@ -859,7 +866,7 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     if (memo.sourceMLIR != sourceMLIR) {
         SourceMemo fresh;
         if (!memoizeSource(mlirCtx, *module, sourceMLIR, fresh,
-                           result.error))
+                           result.error, jitOptLevel))
             return result;
         memo = std::move(fresh);
     }
@@ -868,7 +875,8 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     for (int t : kThreadCounts) {
         ObservedOutcomeSet set;
         int runs;
-        std::string baseKey = std::to_string(t);
+        std::string baseKey =
+            std::to_string(t) + ":o" + std::to_string(jitOptLevel);
         
         auto baseIt = memo.baselines.find(baseKey);
         if (baseIt != memo.baselines.end()) {
@@ -924,7 +932,7 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
         int runSeed = opts.seed >= 0 ? opts.seed : 42;
         ExecutionRunResult run = executeSingle(
             files[i], runSeed, opts.runNumber + static_cast<int>(i),
-            opts.reps);
+            opts.reps, opts.jitOptLevel);
         saveExecutionArtifacts(run, gCampaignDir);
         result.runs.push_back(std::move(run));
     }
@@ -988,7 +996,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
                                  opts.transform, opts.maxApply,
                                  opts.tsanPercent, opts.reps,
                                  opts.retestReps, opts.maxSourceReps,
-                                 opts.thresholdPct);
+                                 opts.thresholdPct, opts.jitOptLevel);
 
         // publish the run into its status folder as it completes; each run's
         // artifacts are written exactly once, so incremental output costs no

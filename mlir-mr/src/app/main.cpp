@@ -38,6 +38,8 @@ int main(int argc, char **argv) {
             opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
         } else if (std::strncmp(argv[i], "--tsan=", 7) == 0) {
             opts.tsanPercent = std::strtol(argv[i] + 7, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--jit-opt-level=", 16) == 0) {
+            opts.jitOptLevel = std::strtol(argv[i] + 16, nullptr, 10);
         } else if (std::strncmp(argv[i], "--campaign-dir=", 15) == 0) {
             opts.campaignDir = argv[i] + 15;
         } else if (std::strncmp(argv[i], "--threshold=", 12) == 0) {
@@ -56,7 +58,7 @@ int main(int argc, char **argv) {
         std::cerr << "usage: mlir-mr-opt [--seed=N] "
                      "[--iter=N] [--emit-mlir] [--run] [--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
-                     "[--tsan=PERCENT] "
+                     "[--tsan=PERCENT] [--jit-opt-level=N] "
                      "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "[--threshold=PCT] "
                      "[--reruns=N] [--max-runs=N] "
@@ -71,6 +73,11 @@ int main(int argc, char **argv) {
 
     if (opts.thresholdPct < 0 || opts.thresholdPct > 100) {
         std::cerr << "--threshold must be between 0 and 100\n";
+        return 1;
+    }
+
+    if (opts.jitOptLevel < -1 || opts.jitOptLevel > 3) {
+        std::cerr << "--jit-opt-level must be between 0 and 3\n";
         return 1;
     }
 

@@ -21,6 +21,7 @@ struct PipelineOptions {
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
     int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
+    int jitOptLevel = -1;     // -1 = LLVM default; 0-3 = LLVM opt level for JIT
     std::string campaignDir;  // output folder; runs are added as they complete
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
     int maxSourceReps = 100000; // hard cap for source runs per baseline

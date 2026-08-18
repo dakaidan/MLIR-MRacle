@@ -9,6 +9,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/DenseMap.h"
@@ -192,6 +193,31 @@ static bool isWrappable(Operation *innerOp) {
             if (!innerOp->isAncestor(user))
                 return false;
     return true;
+}
+
+// True if a section body behaves identically when executed once by a single
+// thread: it touches no shared memory (every memref operand is thread-local)
+// and contains no team-level OpenMP constructs or calls. A single-section
+// omp.sections runs that section on exactly one team thread, so unrolling it
+// out of the omp.parallel preserves the post-join state only under these
+// conditions.
+static bool isSingleThreadBody(Region &region) {
+    WalkResult result = region.walk([&](Operation *innerOp) {
+        if (isa<omp::BarrierOp, omp::CriticalOp, omp::FlushOp, omp::MasterOp,
+                omp::MaskedOp, omp::OrderedOp, omp::ScopeOp, omp::SingleOp,
+                omp::TaskOp, omp::TaskgroupOp, omp::TaskwaitOp,
+                omp::TaskyieldOp, omp::ThreadprivateOp, omp::WsloopOp,
+                omp::ParallelOp, omp::SectionsOp, omp::SectionOp>(innerOp))
+            return WalkResult::interrupt();
+        if (isa<func::CallOp>(innerOp))
+            return WalkResult::interrupt();
+        for (Value operand : innerOp->getOperands())
+            if (isa<MemRefType>(operand.getType()) &&
+                !isThreadLocalMemref(operand, innerOp))
+                return WalkResult::interrupt();
+        return WalkResult::advance();
+    });
+    return !result.wasInterrupted();
 }
 
 // A runtime i1 condition that canonicalization cannot fold: an integer-typed
@@ -395,7 +421,7 @@ struct MetamorphicPass
         using Transform = bool (MetamorphicPass::*)(func::FuncOp, RewriterBase &, std::mt19937 &);
 
         // each transform declares the outcome-set relation it preserves; the
-        // comparison direction for a run follows the composition of the
+        // comparison direction  for a run follows the composition of the
         // transforms actually applied (see core.cpp)
         struct TransformSpec {
             const char *name;
@@ -408,8 +434,16 @@ struct MetamorphicPass
              mlir_mr::OutcomeRelation::Equality},
             {"insert-fence", &MetamorphicPass::tryInsertFence,
              mlir_mr::OutcomeRelation::Subset},
+            {"remove-fence", &MetamorphicPass::tryRemoveFence,
+             mlir_mr::OutcomeRelation::Superset},
             // {"insert-thread", &MetamorphicPass::tryInsertThread},
             {"insert-atomic-write", &MetamorphicPass::tryInsertAtomicWriteInThread,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-atomic-read", &MetamorphicPass::tryInsertAtomicReadInThread,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-atomic-cas", &MetamorphicPass::tryInsertAtomicCAS,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-read-arith", &MetamorphicPass::tryInsertReadArith,
              mlir_mr::OutcomeRelation::Equality},
             {"local-store-duplication", &MetamorphicPass::tryLocalStoreDuplication,
              mlir_mr::OutcomeRelation::Equality},
@@ -429,6 +463,10 @@ struct MetamorphicPass
              mlir_mr::OutcomeRelation::Subset},
             {"insert-fence-between-mem-ops", &MetamorphicPass::tryInsertFenceInbetweenMemOps,
             mlir_mr::OutcomeRelation::Subset},
+            {"insert-critical", &MetamorphicPass::tryInsertCriticalSection,
+            mlir_mr::OutcomeRelation::Subset},
+            {"unroll-single-thread", &MetamorphicPass::tryUnrollSingleThread,
+            mlir_mr::OutcomeRelation::Equality},
         };
 
         auto findSpec = [](llvm::StringRef name) -> const TransformSpec * {
@@ -518,6 +556,9 @@ struct MetamorphicPass
                                 {spec->name, target.getName().str()});
                             runInfo->transformApplied = true;
                         }
+                        llvm::errs() << "=== AFTER " << spec->name << " ===\n";
+                        target.print(llvm::errs());
+                        llvm::errs() << "\n";
                         applied = true;
                         break;
                     }
@@ -633,6 +674,17 @@ private:
         return true;
     }
 
+    // randomly remove fence
+    bool tryRemoveFence(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        SmallVector<omp::FlushOp> fences;
+        op.walk([&](omp::FlushOp fence) { fences.push_back(fence); });
+        if (fences.empty())
+            return false;
+        std::uniform_int_distribution<size_t> dist(0, fences.size() - 1);
+        rewriter.eraseOp(fences[dist(rng)]);
+        return true;
+    }
+
 //    bool tryInsertThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
 //
 //        // Walk to find an existing omp.sections op
@@ -693,6 +745,134 @@ private:
         omp::AtomicWriteOp::create(rewriter, loc, dummyMemref, dummyValue,
                                    /*hint=*/rewriter.getI64IntegerAttr(0),
                                    /*memory_order=*/omp::ClauseMemoryOrderKindAttr{});
+
+        return true;
+    }
+
+    bool tryInsertAtomicReadInThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
+            return false;
+        setInsertPoint(rewriter, point);
+
+        Location loc = op.getLoc();
+
+        mlir::DominanceInfo domInfo(op);
+        auto dominatesPoint = [&](Operation *defOp) {
+            if (point.op)
+                return domInfo.properlyDominates(defOp, point.op);
+            // appending at the end of a block: a def in that block or in an
+            // enclosing region is in scope
+            return defOp->getBlock() == point.block ||
+                   defOp->getParentRegion()->isAncestor(
+                       point.block->getParent());
+        };
+        SmallVector<Value> candidates;
+        op.getBody().walk([&](Operation *innerOp) {
+            if (!isOpInThread(innerOp) ||
+                innerOp->hasTrait<OpTrait::IsTerminator>())
+                return;
+            for (Value res : innerOp->getResults())
+                if (isa<MemRefType>(res.getType()) &&
+                    dominatesPoint(res.getDefiningOp()))
+                    candidates.push_back(res);
+        });
+        if (candidates.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        Value targetMemref = candidates[dist(rng)];
+        auto memrefType = cast<MemRefType>(targetMemref.getType());
+        Value destMemref = memref::AllocaOp::create(
+            rewriter, loc, memrefType, /*dynamicSizes=*/ValueRange{},
+            /*alignment=*/IntegerAttr{});
+
+        omp::AtomicReadOp::create(rewriter, loc, targetMemref, destMemref,
+                                  memrefType.getElementType(),
+                                  /*hint=*/0,
+                                  omp::ClauseMemoryOrderKindAttr{});
+
+        return true;
+    }
+
+    // Insert a strong compare-and-swap on a fresh thread-local location. The
+    // location is atomically initialised to 0 and the CAS expects 42, so it
+    // never fires: the value stays 0 and the post-join state is unchanged,
+    // while the cmpxchg path of omp.atomic.compare is exercised.
+    bool tryInsertAtomicCAS(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+        if (!point.op && !point.block)
+            return false;
+        setInsertPoint(rewriter, point);
+
+        Location loc = op.getLoc();
+
+        auto memrefType = MemRefType::get({}, rewriter.getI32Type());
+        Value memref = memref::AllocaOp::create(rewriter, loc, memrefType,
+                                                /*dynamicSizes=*/ValueRange{},
+                                                /*alignment=*/IntegerAttr{});
+        Value zero = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+        omp::AtomicWriteOp::create(rewriter, loc, memref, zero,
+                                   /*hint=*/rewriter.getI64IntegerAttr(0),
+                                   /*memory_order=*/omp::ClauseMemoryOrderKindAttr{});
+
+        omp::AtomicCompareOp cas = omp::AtomicCompareOp::create(
+            rewriter, loc, memref, /*weak=*/false, /*hint=*/0,
+            /*memory_order=*/omp::ClauseMemoryOrderKindAttr{});
+        Block *body = rewriter.createBlock(&cas.getRegion(), {},
+                                           {rewriter.getI32Type()}, {loc});
+        rewriter.setInsertionPointToStart(body);
+        Value expected = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(42));
+        Value cmp = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                          body->getArgument(0), expected);
+        Value desired = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(7));
+        Value sel = arith::SelectOp::create(rewriter, loc, cmp, desired,
+                                            body->getArgument(0));
+        omp::YieldOp::create(rewriter, loc, ValueRange{sel});
+        return true;
+    }
+
+    bool tryInsertReadArith(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        // get all atomic writes in the function and pick one at random
+        SmallVector<omp::AtomicWriteOp> writes;
+        op.getBody().walk([&](omp::AtomicWriteOp write) {
+            writes.push_back(write);
+        });
+
+        if (writes.empty())
+            return false;
+
+        // only writes of an integer or index expression can carry the no-op
+        // arith wrapper; pointer-typed expressions (e.g. a memref) cannot
+        SmallVector<omp::AtomicWriteOp> intWrites;
+        for (auto write : writes) {
+            if (write.getExpr().getType().isIntOrIndex())
+                intWrites.push_back(write);
+        }
+
+        if (intWrites.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, intWrites.size() - 1);
+        omp::AtomicWriteOp targetWrite = intWrites[dist(rng)];
+
+        // insert a random add or sub 0 on the stored expression before the
+        // atomic write, keeping the stored value unchanged
+        rewriter.setInsertionPoint(targetWrite);
+        Location loc = targetWrite.getLoc();
+        Value value = targetWrite.getExpr();
+        Value zero = arith::ConstantOp::create(rewriter, loc, value.getType(),
+            IntegerAttr::get(value.getType(), 0));
+        Value newValue;
+        if (std::bernoulli_distribution(0.5)(rng)) {
+            newValue = arith::AddIOp::create(rewriter, loc, value, zero);
+        } else {
+            newValue = arith::SubIOp::create(rewriter, loc, value, zero);
+        }
+        targetWrite.setOperand(1, newValue);
 
         return true;
     }
@@ -936,7 +1116,7 @@ private:
         return true;
     }
 
-    bool tryInsertCriticalOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+    bool tryInsertCriticalSection(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         // maximal runs of consecutive wrappable ops inside an omp.section, so
         // each chain is a thread-local group of ops that can be moved into an
         // omp.critical as one unit
@@ -1010,7 +1190,7 @@ private:
         return true;
     }
 
-    bool tryUnrollSingleParallelOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+    bool tryUnrollSingleThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
 
         // Find all omp.parallel ops in the function body that contain exactly
         // one omp.sections op, which in turn contains exactly one omp.section
@@ -1057,6 +1237,8 @@ private:
             // and a single-block section body so it moves out as one unit.
             if (parallel->getNumOperands() != 0 || parallel->getNumResults() != 0)
                 continue;
+            if (sections->getNumOperands() != 0 || sections->getNumResults() != 0)
+                continue;
             if (sections->getParentOp() != parallel.getOperation() ||
                 section->getParentOp() != sections.getOperation())
                 continue;
@@ -1071,14 +1253,20 @@ private:
                 section.getRegion().getBlocks().size() != 1)
                 continue;
 
+            // The unrolled body runs once on the main thread, so it must be
+            // practically equivalent to a single-thread execution: thread-local
+            // memory only, no team-level constructs, and at least one real op.
+            Block &sectionBlock = section.getRegion().front();
+            if (sectionBlock.getOperations().size() < 2 ||
+                !isSingleThreadBody(section.getRegion()))
+                continue;
+
             // Move the section body in front of the omp.parallel, skipping its
             // terminator, then remove the section, sections, and parallel ops.
-            Block &sectionBlock = section.getRegion().front();
             Operation *terminator = sectionBlock.getTerminator();
-            rewriter.setInsertionPoint(parallel);
             for (Operation &op : llvm::make_early_inc_range(sectionBlock))
                 if (&op != terminator)
-                    rewriter.insert(&op);
+                    rewriter.moveOpBefore(&op, parallel.getOperation());
 
             rewriter.eraseOp(section);
             rewriter.eraseOp(sections);
@@ -1098,7 +1286,7 @@ private:
         // Valid one-stage weakening chains per op kind, strongest first.
         // Orders outside the chain (e.g. acquire on a write) cannot be
         // weakened meaningfully and are left alone.
-        auto nextWeakerOrder = [](Operation *innerOp,
+        auto nextWeakerOrder = [&](Operation *innerOp,
                                   omp::ClauseMemoryOrderKind order)
             -> std::optional<omp::ClauseMemoryOrderKind> {
             if (isa<omp::AtomicWriteOp>(innerOp)) {
@@ -1115,6 +1303,24 @@ private:
                 switch (order) {
                 case omp::ClauseMemoryOrderKind::Seq_cst:
                     return omp::ClauseMemoryOrderKind::Acquire;
+                case omp::ClauseMemoryOrderKind::Acquire:
+                    return omp::ClauseMemoryOrderKind::Relaxed;
+                default:
+                    return std::nullopt;
+                }
+            }
+            if (isa<omp::AtomicCompareOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Seq_cst:
+                    return std::uniform_int_distribution<int>(0, 2)(rng) == 0
+                               ? omp::ClauseMemoryOrderKind::Acq_rel
+                               : (std::uniform_int_distribution<int>(0, 1)(rng) == 0
+                                      ? omp::ClauseMemoryOrderKind::Acquire
+                                      : omp::ClauseMemoryOrderKind::Release);
+                case omp::ClauseMemoryOrderKind::Acq_rel:
+                    return std::uniform_int_distribution<int>(0, 1)(rng) == 0
+                               ? omp::ClauseMemoryOrderKind::Acquire
+                               : omp::ClauseMemoryOrderKind::Release;
                 case omp::ClauseMemoryOrderKind::Acquire:
                     return omp::ClauseMemoryOrderKind::Relaxed;
                 default:
@@ -1160,7 +1366,7 @@ private:
         // Valid one-stage weakening chains per op kind, strongest first.
         // Orders outside the chain (e.g. acquire on a write) cannot be
         // weakened meaningfully and are left alone.
-        auto nextStrongerOrder = [](Operation *innerOp,
+        auto nextStrongerOrder = [&](Operation *innerOp,
                                   omp::ClauseMemoryOrderKind order)
             -> std::optional<omp::ClauseMemoryOrderKind> {
             if (isa<omp::AtomicWriteOp>(innerOp)) {
@@ -1178,6 +1384,25 @@ private:
                 case omp::ClauseMemoryOrderKind::Relaxed:
                     return omp::ClauseMemoryOrderKind::Acquire;
                 case omp::ClauseMemoryOrderKind::Acquire:
+                    return omp::ClauseMemoryOrderKind::Seq_cst;
+                default:
+                    return std::nullopt;
+                }
+            }
+            if (isa<omp::AtomicCompareOp>(innerOp)) {
+                switch (order) {
+                case omp::ClauseMemoryOrderKind::Relaxed:
+                    // pick between acquire, acq_rel or seq_cst
+                    return std::uniform_int_distribution<int>(0, 2)(rng) == 0
+                               ? omp::ClauseMemoryOrderKind::Acquire
+                               : (std::uniform_int_distribution<int>(0, 1)(rng) == 0
+                                      ? omp::ClauseMemoryOrderKind::Acq_rel
+                                      : omp::ClauseMemoryOrderKind::Seq_cst);
+                case omp::ClauseMemoryOrderKind::Acquire:
+                    return std::uniform_int_distribution<int>(0, 1)(rng) == 0
+                               ? omp::ClauseMemoryOrderKind::Acq_rel
+                               : omp::ClauseMemoryOrderKind::Seq_cst;
+                case omp::ClauseMemoryOrderKind::Acq_rel:
                     return omp::ClauseMemoryOrderKind::Seq_cst;
                 default:
                     return std::nullopt;
@@ -1219,7 +1444,7 @@ private:
     }
 
     // ARMv8 TRANSFORMS BELOW
-    
+
     bool tryInsertFenceInbetweenMemOps(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         // get chains of consecutive atomic writes and reads in threads
         SmallVector<SmallVector<Operation *>> chains =
@@ -1244,8 +1469,6 @@ private:
         omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
         return true;
     }
-
-    bool 
 };
 
 std::unique_ptr<Pass> createMetamorphicPass(
