@@ -84,3 +84,4 @@ cache/
 emitted/
 .DS_Store
 fuzzing/interesting-runs/
+debug-progs/

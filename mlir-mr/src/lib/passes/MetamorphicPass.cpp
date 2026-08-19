@@ -503,9 +503,15 @@ struct MetamorphicPass
              mlir_mr::OutcomeRelation::Subset},
             {"insert-fence-between-mem-ops", &MetamorphicPass::tryInsertFenceInbetweenMemOps,
             mlir_mr::OutcomeRelation::Subset},
+            {"insert-flush-around-seq-cst", &MetamorphicPass::tryInsertFlushAroundSeqCst,
+            mlir_mr::OutcomeRelation::Equality},
             {"insert-critical", &MetamorphicPass::tryInsertCriticalSection,
             mlir_mr::OutcomeRelation::Subset},
             {"unroll-single-thread", &MetamorphicPass::tryUnrollSingleThread,
+            mlir_mr::OutcomeRelation::Equality},
+            {"commute-relaxed-read-write", &MetamorphicPass::tryCommuteRelaxedReadWrite,
+            mlir_mr::OutcomeRelation::Equality},
+            {"commute-relaxed-write-write", &MetamorphicPass::tryCommuteRelaxedWriteWrite,
             mlir_mr::OutcomeRelation::Equality},
         };
 
@@ -553,69 +559,66 @@ struct MetamorphicPass
         if (funcs.empty())
             return;
 
-        // pick a function at random to transform; if no transformation
-        // applies, repick a new test case (function) up to a fixed number of
-        // attempts before giving up
-        std::uniform_int_distribution<size_t> dist(0, funcs.size() - 1);
+        // Shuffle the functions so each one gets its own random tries.
+        // Every function receives up to kMaxTransformAttempts independent
+        // random attempts; a function that fails all of them is abandoned in
+        // favour of the next one, and only when every function has been
+        // exhausted do we signal failure.
+        std::shuffle(funcs.begin(), funcs.end(), rng);
         constexpr int kMaxTransformAttempts = 3;
-        llvm::DenseSet<func::FuncOp> tried;
-        for (int attempt = 0; attempt < kMaxTransformAttempts; ++attempt) {
-            func::FuncOp target;
-            do {
-                target = funcs[dist(rng)];
-            } while (tried.contains(target) && tried.size() < funcs.size());
-            tried.insert(target);
+        for (func::FuncOp target : funcs) {
+            for (int attempt = 0; attempt < kMaxTransformAttempts; ++attempt) {
+                int transformCounter = 0;
+                std::optional<mlir_mr::OutcomeRelation> aggregate;
 
-            int transformCounter = 0;
-            std::optional<mlir_mr::OutcomeRelation> aggregate;
-
-            // keep applying random transformations until max applications is
-            // reached; transforms whose relation would contradict the direction
-            // already established are excluded from the draw
-            while (transformCounter < maxApply) {
-                SmallVector<const TransformSpec *> allowed;
-                for (const TransformSpec *spec : transforms)
-                    if (canApplyAfter(
-                            aggregate.value_or(mlir_mr::OutcomeRelation::Equality),
-                            spec->relation))
-                        allowed.push_back(spec);
-                if (allowed.empty())
-                    break;
-
-                std::shuffle(allowed.begin(), allowed.end(), rng);
-                bool applied = false;
-                for (const TransformSpec *spec : allowed)
-                    if ((this->*spec->fn)(target, rewriter, rng)) {
-                        transformCounter++;
-                        aggregate =
-                            aggregate
-                                ? composeRelation(*aggregate, spec->relation)
-                                : spec->relation;
-                        if (runInfo) {
-                            runInfo->appliedTransforms.push_back(
-                                {spec->name, target.getName().str()});
-                            runInfo->transformApplied = true;
-                        }
-                        llvm::errs() << "=== AFTER " << spec->name << " ===\n";
-                        target.print(llvm::errs());
-                        llvm::errs() << "\n";
-                        applied = true;
+                // keep applying random transformations until max applications
+                // is reached; transforms whose relation would contradict the
+                // direction already established are excluded from the draw
+                while (transformCounter < maxApply) {
+                    SmallVector<const TransformSpec *> allowed;
+                    for (const TransformSpec *spec : transforms)
+                        if (canApplyAfter(
+                                aggregate.value_or(mlir_mr::OutcomeRelation::Equality),
+                                spec->relation))
+                            allowed.push_back(spec);
+                    if (allowed.empty())
                         break;
-                    }
 
-                if (!applied)
-                    break;
+                    std::shuffle(allowed.begin(), allowed.end(), rng);
+                    bool applied = false;
+                    for (const TransformSpec *spec : allowed)
+                        if ((this->*spec->fn)(target, rewriter, rng)) {
+                            transformCounter++;
+                            aggregate =
+                                aggregate
+                                    ? composeRelation(*aggregate, spec->relation)
+                                    : spec->relation;
+                            if (runInfo) {
+                                runInfo->appliedTransforms.push_back(
+                                    {spec->name, target.getName().str()});
+                                runInfo->transformApplied = true;
+                            }
+                            llvm::errs() << "=== AFTER " << spec->name << " ===\n";
+                            target.print(llvm::errs());
+                            llvm::errs() << "\n";
+                            applied = true;
+                            break;
+                        }
+
+                    if (!applied)
+                        break;
                 }
 
-            if (aggregate) {
-                if (runInfo)
-                    runInfo->relation = *aggregate;
-                return;
+                if (aggregate) {
+                    if (runInfo)
+                        runInfo->relation = *aggregate;
+                    return;
+                }
             }
         }
 
         if (runInfo)
-            runInfo->error = "tried applying transformation " +
+            runInfo->error = "tried applying transformations to every function " +
                              std::to_string(kMaxTransformAttempts) + " times";
         signalPassFailure();
     }
@@ -1574,6 +1577,127 @@ private:
 
         rewriter.setInsertionPointAfter(chain[0]);
         omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
+        return true;
+    }
+
+    // Find all seq_cst atomic ops in the function (memory_order defaults to
+    // seq_cst when unset), pick one at random, and insert an omp.flush before
+    // it, after it, or both. Wrapping an already-strongest-order op in a
+    // flush is a semantic no-op, so the outcome set is unchanged.
+    bool tryInsertFlushAroundSeqCst(func::FuncOp op, RewriterBase &rewriter,
+                                    std::mt19937 &rng) {
+        SmallVector<Operation *> candidates;
+        op.getBody().walk([&](Operation *innerOp) {
+            std::optional<omp::ClauseMemoryOrderKind> order;
+            if (auto write = dyn_cast<omp::AtomicWriteOp>(innerOp))
+                order = write.getMemoryOrder();
+            else if (auto read = dyn_cast<omp::AtomicReadOp>(innerOp))
+                order = read.getMemoryOrder();
+            else if (auto cmp = dyn_cast<omp::AtomicCompareOp>(innerOp))
+                order = cmp.getMemoryOrder();
+            else
+                return;
+
+            if (order.value_or(omp::ClauseMemoryOrderKind::Seq_cst) ==
+                omp::ClauseMemoryOrderKind::Seq_cst)
+                candidates.push_back(innerOp);
+        });
+
+        if (candidates.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        Operation *target = candidates[dist(rng)];
+
+        bool before = std::bernoulli_distribution(0.5)(rng);
+        bool after = std::bernoulli_distribution(0.5)(rng);
+        if (!before && !after)
+            before = true;
+
+        Location loc = op.getLoc();
+        if (before) {
+            rewriter.setInsertionPoint(target);
+            omp::FlushOp::create(rewriter, loc, ValueRange{});
+        }
+        if (after) {
+            rewriter.setInsertionPointAfter(target);
+            omp::FlushOp::create(rewriter, loc, ValueRange{});
+        }
+        return true;
+    }
+
+    // Swap an adjacent relaxed atomic read/write pair
+    bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
+                                    std::mt19937 &rng) {
+        SmallVector<std::pair<omp::AtomicReadOp, omp::AtomicWriteOp>> pairs;
+        op.getBody().walk([&](Block *block) {
+            for (auto it = block->begin(); it != block->end(); ++it) {
+                auto read = dyn_cast<omp::AtomicReadOp>(&*it);
+                if (!read)
+                    continue;
+                auto next = std::next(it);
+                if (next == block->end())
+                    continue;
+                auto write = dyn_cast<omp::AtomicWriteOp>(&*next);
+                if (!write)
+                    continue;
+                if (read.getMemoryOrder().value_or(
+                        omp::ClauseMemoryOrderKind::Seq_cst) !=
+                        omp::ClauseMemoryOrderKind::Relaxed ||
+                    write.getMemoryOrder().value_or(
+                        omp::ClauseMemoryOrderKind::Seq_cst) !=
+                        omp::ClauseMemoryOrderKind::Relaxed)
+                    continue;
+                if (read.getX() == write.getX() ||
+                    read.getV() == write.getX())
+                    continue;
+                pairs.push_back({read, write});
+            }
+        });
+
+        if (pairs.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, pairs.size() - 1);
+        auto [read, write] = pairs[dist(rng)];
+        rewriter.moveOpBefore(write, read);
+        return true;
+    }
+
+    // Swap an adjacent pair of relaxed atomic writes to independent locations
+    bool tryCommuteRelaxedWriteWrite(func::FuncOp op, RewriterBase &rewriter,
+                                     std::mt19937 &rng) {
+        SmallVector<std::pair<omp::AtomicWriteOp, omp::AtomicWriteOp>> pairs;
+        op.getBody().walk([&](Block *block) {
+            for (auto it = block->begin(); it != block->end(); ++it) {
+                auto first = dyn_cast<omp::AtomicWriteOp>(&*it);
+                if (!first)
+                    continue;
+                auto next = std::next(it);
+                if (next == block->end())
+                    continue;
+                auto second = dyn_cast<omp::AtomicWriteOp>(&*next);
+                if (!second)
+                    continue;
+                if (first.getMemoryOrder().value_or(
+                        omp::ClauseMemoryOrderKind::Seq_cst) !=
+                        omp::ClauseMemoryOrderKind::Relaxed ||
+                    second.getMemoryOrder().value_or(
+                        omp::ClauseMemoryOrderKind::Seq_cst) !=
+                        omp::ClauseMemoryOrderKind::Relaxed)
+                    continue;
+                if (first.getX() == second.getX())
+                    continue;
+                pairs.push_back({first, second});
+            }
+        });
+
+        if (pairs.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, pairs.size() - 1);
+        auto [first, second] = pairs[dist(rng)];
+        rewriter.moveOpBefore(second, first);
         return true;
     }
 
