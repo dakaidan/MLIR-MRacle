@@ -37,18 +37,21 @@ std::vector<JointOutcome> outcomeSetDifference(
 // transformed batch; outcomes absent from the source are anchored on one
 // expected chance occurrence. An outcome the source produces below
 // thresholdPct percent of its runs that appears at or above that rate in the
-// transformed batch fails. Other transformed counts outside the two-sided
-// Poisson range of the expected count (p < 1e-6) warn; the rest are ok.
+// transformed batch fails only when its count also exceeds the Poisson upper
+// bound of the expected count (p < 1e-6). Other transformed counts outside
+// the two-sided Poisson range of the expected count (p < 1e-6) warn; the
+// rest are ok.
 OutcomeSetResult compareOutcomeSets(const ObservedOutcomeSet &source,
                                     const ObservedOutcomeSet &transformed,
                                     int numThreads, int thresholdPct);
 
 // Subset-direction comparison: the transformed outcome set must be a subset
 // of the source outcome set, so only outcomes the transformed side adds are
-// judged. Missing source outcomes are allowed. A transformed-only outcome at
-// or above thresholdPct percent of transformed runs fails; one below the
-// threshold but beyond the Poisson bound of a single chance occurrence warns.
-// The 1-thread determinism check is shared with compareOutcomeSets.
+// judged. Missing source outcomes are allowed. A transformed-only outcome
+// whose count is beyond the Poisson bound of a single chance occurrence and
+// that appears at or above thresholdPct percent of transformed runs fails;
+// one beyond the bound but below the threshold warns. The 1-thread
+// determinism check is shared with compareOutcomeSets.
 OutcomeSetResult compareOutcomeSetsSubset(
     const ObservedOutcomeSet &source, const ObservedOutcomeSet &transformed,
     int numThreads, int thresholdPct);
@@ -57,9 +60,10 @@ OutcomeSetResult compareOutcomeSetsSubset(
 // superset of the source outcome set, so only outcomes the transformed side
 // drops are judged. Extra transformed outcomes are allowed. A source outcome
 // produced at or above thresholdPct percent of source runs that is absent
-// from the transformed set fails; a rarer source outcome whose absence is
-// statistically significant warns. The 1-thread determinism check is shared
-// with compareOutcomeSets.
+// from the transformed set fails when the absence is also
+// Poisson-significant; a rarer source outcome whose absence is statistically
+// significant warns. The 1-thread determinism check is shared with
+// compareOutcomeSets.
 OutcomeSetResult compareOutcomeSetsSuperset(
     const ObservedOutcomeSet &source, const ObservedOutcomeSet &transformed,
     int numThreads, int thresholdPct);

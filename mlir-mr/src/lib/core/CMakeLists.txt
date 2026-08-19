@@ -13,6 +13,7 @@ target_link_libraries(mlir_mr_core PUBLIC
     mlir_mr_io
     mlir_mr_context
     mlir_mr_oracle
+    mlir_mr_execution
     mlir_mr_lowering
     mlir_mr_jit
     llvm_mlir_headers

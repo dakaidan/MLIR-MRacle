@@ -16,6 +16,7 @@
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 
 #include <cstdint>
@@ -172,7 +173,12 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
             if (jitOptLevel >= 0)
                 jtmb->setCodeGenOptLevel(
                     static_cast<llvm::CodeGenOptLevel>(jitOptLevel));
-            if (bbSections != llvm::BasicBlockSection::None) {
+            // Per-basic-block sections are only implemented for ELF
+            // (TargetLoweringObjectFile::getUniqueSectionForFunction is
+            // overridden by ELF alone); on MachO/COFF requesting them makes
+            // the asm printer switch to a null section and crash.
+            if (bbSections != llvm::BasicBlockSection::None &&
+                jtmb->getTargetTriple().getObjectFormat() == llvm::Triple::ELF) {
                 auto opts = jtmb->getOptions();
                 opts.BBSections = bbSections;
                 jtmb->setOptions(opts);

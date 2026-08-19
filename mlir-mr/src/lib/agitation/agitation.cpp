@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <random>
 #include <set>
-#include <tuple>
 
 namespace mlir_mr {
 
@@ -42,33 +41,21 @@ void shuffleBasicBlocks(llvm::Module &module, std::mt19937 &rng) {
 std::vector<AgitationConfig> generateAgitationConfigs(uint32_t seed,
                                                       int configCount) {
     static constexpr int kThreads[] = {2, 3, 4, 6, 8};
-    static constexpr ScheduleKind kSchedules[] = {
-        ScheduleKind::Static, ScheduleKind::Dynamic, ScheduleKind::Guided,
-        ScheduleKind::Auto};
-    static constexpr int kChunks[] = {1, 2, 4, 8, 16};
-    static constexpr int kCombos = 5 * 4 * 5 * 2; // threads * scheds * chunks * dynamic
+    static constexpr int kCombos = 5;
 
     configCount = std::min(configCount, kCombos);
 
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> threadDist(0, 4);
-    std::uniform_int_distribution<int> schedDist(0, 3);
-    std::uniform_int_distribution<int> chunkDist(0, 4);
-    std::uniform_int_distribution<int> dynDist(0, 1);
 
     std::vector<AgitationConfig> configs;
     configs.reserve(configCount);
-    std::set<std::tuple<int, int, int, int>> seen;
+    std::set<int> seen;
     while (static_cast<int>(configs.size()) < configCount) {
-        OpenMPSettings omp{kThreads[threadDist(rng)],
-                           kSchedules[schedDist(rng)], kChunks[chunkDist(rng)],
-                           dynDist(rng) == 1};
-        auto key = std::make_tuple(omp.numThreads,
-                                   static_cast<int>(omp.schedule),
-                                   omp.chunkSize, omp.dynamic ? 1 : 0);
-        if (!seen.insert(key).second)
+        int numThreads = kThreads[threadDist(rng)];
+        if (!seen.insert(numThreads).second)
             continue;
-        configs.push_back({omp, 0});
+        configs.push_back({{numThreads}, 0});
     }
     return configs;
 }
@@ -80,12 +67,20 @@ std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
     if (error)
         error->clear();
 
-    std::vector<int> levels = opts.jitOptLevels;
-    if (levels.empty())
-        levels = {0, 1, 2, 3, 3};
+    // every binary gets a CodeGen opt level from {0, 1, 2, 3}; with at least
+    // four binaries all four levels are guaranteed to appear so the sweep
+    // never misses a code generator. The order is shuffled from the seed so
+    // source and transformed sides compile with the same sequence.
+    std::vector<int> levels;
+    levels.reserve(opts.binaryCount);
+    for (int i = 0; i < opts.binaryCount; ++i)
+        levels.push_back(i % 4);
+    std::mt19937 optRng(opts.shuffleSeed);
+    std::shuffle(levels.begin(), levels.end(), optRng);
 
     std::vector<CompiledBinary> out;
-    for (size_t i = 0; i < levels.size(); ++i) {
+    for (int i = 0; i < opts.binaryCount; ++i) {
+        int optLevel = levels[i];
         auto clone = llvm::CloneModule(module);
         llvm::BasicBlockSection bbSections = llvm::BasicBlockSection::None;
         if (opts.shuffleCode) {
@@ -97,14 +92,14 @@ std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
 
         std::string err;
         auto fn = compileLLVMModuleToFunction(std::move(clone), &err,
-                                              opts.enableTsan, levels[i],
+                                              opts.enableTsan, optLevel,
                                               bbSections);
         if (!fn) {
             if (error)
                 *error = err;
             break;
         }
-        out.push_back({side, static_cast<int>(i), levels[i], std::move(fn)});
+        out.push_back({side, i, optLevel, std::move(fn)});
     }
     return out;
 }

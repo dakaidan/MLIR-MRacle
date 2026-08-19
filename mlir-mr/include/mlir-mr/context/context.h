@@ -64,6 +64,18 @@ struct ThreadGroupResult {
     OutcomeSetResult outcomeSet;
 };
 
+// outcomes observed for a single compiled binary during an agitation sweep;
+// the concise per-binary breakdown appended below the union outcome sets in
+// the new-oracle run_info.json
+struct BinaryOutcomeResult {
+    std::string side;      // "source" | "transformed"
+    int compileIndex = 0;  // index within the side's binary set
+    int jitOptLevel = -1;  // CodeGen opt level used for this binary
+    int runs = 0;          // executions represented by outcomes/counts
+    std::vector<JointOutcome> outcomes;
+    std::vector<int64_t> counts;
+};
+
 // Main data object about a single run of the metamorphic testing pipeline.
 struct RunInfo {
     int runNumber = 0;
@@ -73,6 +85,16 @@ struct RunInfo {
     std::vector<AppliedTransformation> appliedTransforms;
     std::vector<ThreadGroupResult> threadResults;
     bool transformApplied = false;
+    // union outcome sets aggregated over the whole agitation sweep (thread
+    // counts, opt levels, code layout); filled by the new-oracle pipeline
+    // instead of a fake thread group
+    int64_t sourceRuns = 0;
+    int64_t transformedRuns = 0;
+    std::vector<JointOutcome> sourceOutcomes;
+    std::vector<int64_t> sourceCounts;
+    std::vector<JointOutcome> transformedOutcomes;
+    std::vector<int64_t> transformedCounts;
+    std::vector<BinaryOutcomeResult> binaryOutcomes;
     OutcomeRelation relation = OutcomeRelation::Equality;
     std::string error;
     std::string warn;

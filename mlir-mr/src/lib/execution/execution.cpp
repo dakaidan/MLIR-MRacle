@@ -11,30 +11,15 @@ namespace mlir_mr {
 
 namespace {
 
-omp_sched_t toOmpSched(ScheduleKind kind) {
-    switch (kind) {
-    case ScheduleKind::Static:
-        return omp_sched_static;
-    case ScheduleKind::Dynamic:
-        return omp_sched_dynamic;
-    case ScheduleKind::Guided:
-        return omp_sched_guided;
-    case ScheduleKind::Auto:
-        return omp_sched_auto;
-    }
-    return omp_sched_static;
-}
-
 void applyProcessSettings() {
+    // OMP_DYNAMIC is read only at OpenMP runtime initialisation, so it is
+    // pinned once process-wide; per-config variation uses
+    // omp_set_num_threads only.
     setenv("OMP_DYNAMIC", "false", 1);
-    setenv("OMP_PROC_BIND", "close", 1);
-    setenv("GOMP_CPU_AFFINITY", "0 1", 1);
 }
 
 void applyConfig(const AgitationConfig &cfg) {
-    omp_set_dynamic(cfg.omp.dynamic ? 1 : 0);
     omp_set_num_threads(cfg.omp.numThreads);
-    omp_set_schedule(toOmpSched(cfg.omp.schedule), cfg.omp.chunkSize);
 }
 
 BinaryExecutionResult runBinary(const CompiledBinary &binary,
@@ -44,8 +29,7 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
     result.binaryIndex = binaryIndex;
     result.side = binary.side;
 
-    AgitationConfig single{{1, ScheduleKind::Static, 1, false},
-                           singleThreadRuns};
+    AgitationConfig single{{1}, singleThreadRuns};
     applyConfig(single);
     result.singleThread = collectOutcomeSet(binary.fn, singleThreadRuns, 1);
 
@@ -56,9 +40,9 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
         cfgResult.config = configs[i];
         cfgResult.outcomes = collectOutcomeSet(binary.fn, configs[i].runs,
                                                configs[i].omp.numThreads);
-        result.perConfig.push_back(std::move(cfgResult));
         result.threadedTotal =
             mergeOutcomeSets(result.threadedTotal, cfgResult.outcomes);
+        result.perConfig.push_back(std::move(cfgResult));
     }
     return result;
 }
@@ -114,7 +98,60 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
         result.binaryResults.push_back(std::move(br));
     }
     result.total = mergeOutcomeSets(result.sourceTotal, result.transformedTotal);
+    result.configs = std::move(configs);
     return result;
+}
+
+void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
+                      uint32_t roundSeed, int configCount) {
+    if (extraRuns <= 0)
+        return;
+
+    // a replay round re-agitates: draw a fresh team-size mix from the round
+    // seed instead of re-using the initial batch's configs
+    std::vector<AgitationConfig> runConfigs =
+        generateAgitationConfigs(roundSeed, configCount);
+    if (runConfigs.empty())
+        return;
+
+    int base = extraRuns / static_cast<int>(runConfigs.size());
+    int rem = extraRuns % static_cast<int>(runConfigs.size());
+    for (size_t i = 0; i < runConfigs.size(); ++i)
+        runConfigs[i].runs = base + (static_cast<int>(i) < rem ? 1 : 0);
+
+    std::vector<const CompiledBinary *> binaries;
+    binaries.reserve(exec.sourceBinaries.size() +
+                     exec.transformedBinaries.size());
+    for (const auto &b : exec.sourceBinaries)
+        binaries.push_back(&b);
+    for (const auto &b : exec.transformedBinaries)
+        binaries.push_back(&b);
+
+    // the per-config breakdown describes the initial batch only; replay
+    // rounds merge straight into the per-binary threaded totals
+    for (size_t b = 0; b < binaries.size() && b < exec.binaryResults.size();
+         ++b) {
+        auto &br = exec.binaryResults[b];
+        for (const auto &cfg : runConfigs) {
+            applyConfig(cfg);
+            ObservedOutcomeSet extraSet = collectOutcomeSet(
+                binaries[b]->fn, cfg.runs, cfg.omp.numThreads);
+            br.threadedTotal =
+                mergeOutcomeSets(br.threadedTotal, extraSet);
+        }
+    }
+
+    exec.sourceTotal = ObservedOutcomeSet{};
+    exec.transformedTotal = ObservedOutcomeSet{};
+    for (const auto &br : exec.binaryResults) {
+        if (br.side == "source")
+            exec.sourceTotal =
+                mergeOutcomeSets(exec.sourceTotal, br.threadedTotal);
+        else
+            exec.transformedTotal =
+                mergeOutcomeSets(exec.transformedTotal, br.threadedTotal);
+    }
+    exec.total = mergeOutcomeSets(exec.sourceTotal, exec.transformedTotal);
 }
 
 } // namespace mlir_mr

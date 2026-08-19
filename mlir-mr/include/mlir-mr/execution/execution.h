@@ -32,10 +32,9 @@ struct ExecutionOptions {
     int singleThreadRuns = 32;
     // Number of distinct random OpenMP configs per binary.
     int configCount = 5;
-    // OMP_PROC_BIND and GOMP_CPU_AFFINITY are read only at OpenMP runtime
-    // initialisation, so they are applied once process-wide with fixed values
-    // (see applyProcessSettings); per-config variation uses the omp_set_*
-    // runtime APIs only.
+    // OMP_DYNAMIC is read only at OpenMP runtime initialisation, so it is
+    // pinned once process-wide (see applyProcessSettings); per-config
+    // variation uses omp_set_num_threads only.
     CompileOptions compile;
 };
 
@@ -43,6 +42,11 @@ struct ExecutionResult {
     std::vector<CompiledBinary> sourceBinaries;
     std::vector<CompiledBinary> transformedBinaries;
     std::vector<BinaryExecutionResult> binaryResults;
+
+    // the agitation configs used for the initial batch; replay rounds
+    // generate a fresh team-size mix per round, so this set is diagnostic
+    // only
+    std::vector<AgitationConfig> configs;
 
     ObservedOutcomeSet sourceTotal;
     ObservedOutcomeSet transformedTotal;
@@ -60,5 +64,17 @@ struct ExecutionResult {
 ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
                                     const llvm::Module &transformedModule,
                                     const ExecutionOptions &opts);
+
+// Re-runs every compiled binary (source and transformed) for extraRuns total
+// additional executions, going through the agitation process again: a fresh
+// team-size mix is generated from roundSeed and the extra runs are spread
+// across it. The per-binary totals are merged, then the aggregated outcome
+// sets are recomputed. The binaries themselves are not recompiled (code
+// generation is deterministic for a fixed module, and the initial sweep
+// already samples the compile-variance axis). The single-thread determinism
+// probes are not replayed; they are a fixed check that the replay round never
+// invalidates.
+void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
+                      uint32_t roundSeed, int configCount = 5);
 
 } // namespace mlir_mr

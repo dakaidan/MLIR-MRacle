@@ -12,7 +12,7 @@ namespace mlir_mr {
 struct PipelineOptions {
     std::string inputFile;
     std::string multiFolder;
-    int seed = -1;            // -1 = random per run, >=0 = fixed
+    int seed = -1; // -1 = deterministic per-run seed derived from run index, >=0 = fixed
     int runNumber = 0;        // first run index
     int numRuns = 1;          // pipeline repetitions, set by --iter
     bool straightMode = false; // --run: execute each file, no transforms
@@ -21,11 +21,10 @@ struct PipelineOptions {
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
     int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
-    int jitOptLevel = -1;     // -1 = LLVM default; 0-3 = LLVM opt level for JIT
     std::string campaignDir;  // output folder; runs are added as they complete
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
-    int maxSourceReps = 100000; // hard cap for source runs per baseline
-    int thresholdPct = 5; // transformed-only outcomes at/above this % fail, below warn
+    int maxSourceReps = 100000; // hard cap for total source runs across all binaries
+    int thresholdPct = 5; // fail/warn classifier; deviations are only flagged when Poisson-significant
 };
 
 // schema version embedded in persistent baseline-cache keys and prefixes
@@ -38,6 +37,12 @@ struct PipelineResult {
 
 PipelineResult runPipeline(const PipelineOptions &opts);
 PipelineResult runEmitPipeline(const PipelineOptions &opts);
+
+// default mode: compile both modules as an in-memory binary set (no
+// bitcode/cache), run the agitation sweep, judge the aggregate outcome sets
+// with newOracleCompare, replay rare states up to maxSourceReps, then report
+// the final post-replay verdict.
+PipelineResult runNewOraclePipeline(const PipelineOptions &opts);
 
 struct ExecutionPipelineResult {
     std::vector<ExecutionRunResult> runs;

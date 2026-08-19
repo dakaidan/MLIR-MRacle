@@ -14,7 +14,6 @@ target_include_directories(mlir_mr_execution PUBLIC
 )
 
 target_link_libraries(mlir_mr_execution PUBLIC
-    mlir_mr_core
     mlir_mr_agitation
     mlir_mr_oracle
     OpenMP::OpenMP_CXX

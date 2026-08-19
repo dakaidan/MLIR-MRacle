@@ -113,6 +113,44 @@ static void collectThreadInsertPoints(Region &region, bool inThread,
     }
 }
 
+// A shared-memory op inside a thread region: an atomic access or a flush.
+// Jitter delays are inserted in the gaps around these ops so the shared
+// accesses of different threads drift apart instead of firing in lockstep.
+static bool isSharedMemoryOp(Operation *op) {
+    return isa<omp::AtomicWriteOp, omp::AtomicReadOp, omp::AtomicCompareOp,
+                omp::FlushOp>(op);
+}
+
+// Collect the gaps between consecutive shared-memory ops inside thread
+// regions: one insert point before every shared-memory op (covering the
+// before-first and between gaps) plus one after the last shared-memory op in
+// each block that has any.
+static void collectSharedMemoryGaps(Region &region, bool inThread,
+                                    SmallVectorImpl<InsertPoint> &gaps) {
+    for (Block &block : region) {
+        bool blockInThread = inThread ||
+                             isa<omp::SectionOp>(block.getParentOp()) ||
+                             isa<omp::ParallelOp>(block.getParentOp());
+        if (!isa<omp::SectionsOp>(block.getParentOp()) && blockInThread) {
+            SmallVector<Operation *> shared;
+            for (Operation &op : block)
+                if (isSharedMemoryOp(&op))
+                    shared.push_back(&op);
+            for (Operation *sharedOp : shared)
+                gaps.push_back({sharedOp, nullptr});
+            if (!shared.empty()) {
+                if (block.back().hasTrait<OpTrait::IsTerminator>())
+                    gaps.push_back({&block.back(), nullptr});
+                else
+                    gaps.push_back({nullptr, &block});
+            }
+        }
+        for (Operation &op : block)
+            for (Region &child : op.getRegions())
+                collectSharedMemoryGaps(child, blockInThread, gaps);
+    }
+}
+
 // Returns a random insertion point inside a thread region. When the function
 // has no thread region, a fresh omp.parallel / omp.sections / omp.section nest
 // is created at the start of the entry block, so code-inserting transforms
@@ -450,6 +488,8 @@ struct MetamorphicPass
             {"insert-random-arith", &MetamorphicPass::tryInsertRandomArith,
              mlir_mr::OutcomeRelation::Equality},
             {"insert-random-memref", &MetamorphicPass::tryInsertRandomMemref,
+             mlir_mr::OutcomeRelation::Equality},
+            {"insert-jitter", &MetamorphicPass::tryInsertJitter,
              mlir_mr::OutcomeRelation::Equality},
             {"insert-comparison", &MetamorphicPass::tryInsertComparison,
              mlir_mr::OutcomeRelation::Equality},
@@ -972,6 +1012,36 @@ private:
         return true;
     }
 
+    // Insert random-length thread-local delay chains into a gap between
+    // shared-memory ops inside a thread region, so the shared accesses of
+    // different threads drift apart instead of firing in lockstep. When a
+    // module has no shared-memory gaps, falls back to a plain chain inside a
+    // thread region (creating one when none exists), so the transform always
+    // applies.
+    bool tryInsertJitter(func::FuncOp op, RewriterBase &rewriter,
+                         std::mt19937 &rng) {
+        SmallVector<InsertPoint> gaps;
+        collectSharedMemoryGaps(op.getRegion(), /*inThread=*/false, gaps);
+
+        InsertPoint point;
+        if (!gaps.empty()) {
+            std::uniform_int_distribution<size_t> dist(0, gaps.size() - 1);
+            point = gaps[dist(rng)];
+        } else {
+            point = makeThreadInsertPoint(op, rewriter, rng);
+        }
+        if (!point.op && !point.block)
+            return false;
+        setInsertPoint(rewriter, point);
+
+        ArithGenerator gen(rng);
+        int chains = std::uniform_int_distribution<int>(1, 3)(rng);
+        for (int i = 0; i < chains; ++i)
+            gen.generateMixed(rewriter, op.getLoc());
+
+        return true;
+    }
+
     bool tryInsertComparison(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         // Collect integer-typed results defined inside thread regions
         // (omp.section / omp.parallel). Comparing a value with itself (x == x)
@@ -1119,12 +1189,31 @@ private:
     bool tryInsertCriticalSection(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         // maximal runs of consecutive wrappable ops inside an omp.section, so
         // each chain is a thread-local group of ops that can be moved into an
-        // omp.critical as one unit
+        // omp.critical as one unit. Ops already inside a critical are
+        // excluded: unnamed criticals share one runtime lock, so wrapping a
+        // chain nested in a critical would re-enter that same lock and
+        // deadlock a single thread running both sections.
         SmallVector<SmallVector<Operation *>> chains =
             collectOpRuns(op, [](Operation *innerOp) {
                 return innerOp->getParentOfType<omp::SectionOp>() &&
+                       !innerOp->getParentOfType<omp::CriticalOp>() &&
                        isWrappable(innerOp);
             });
+
+        // a chain that contains an omp.critical in any nested region would
+        // place one critical inside another once wrapped
+        llvm::erase_if(chains, [](const SmallVector<Operation *> &chain) {
+            for (Operation *op : chain) {
+                WalkResult result = op->walk([&](Operation *inner) {
+                    return isa<omp::CriticalOp>(inner)
+                               ? WalkResult::interrupt()
+                               : WalkResult::advance();
+                });
+                if (result.wasInterrupted())
+                    return true;
+            }
+            return false;
+        });
 
         if (chains.empty())
             return false;
@@ -1443,6 +1532,24 @@ private:
         return true;
     }
 
+    bool tryChangeCompareOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
+        SmallVector<omp::AtomicCompareOp> candidates;
+        op.getBody().walk([&](omp::AtomicCompareOp cmp) {
+            candidates.push_back(cmp);
+        });
+
+        if (candidates.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+        omp::AtomicCompareOp targetCmp = candidates[dist(rng)];
+
+        // flip the weak flag
+        targetCmp.setWeak(!targetCmp.getWeak());
+
+        return true;
+    }
+
     // ARMv8 TRANSFORMS BELOW
 
     bool tryInsertFenceInbetweenMemOps(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
@@ -1469,6 +1576,8 @@ private:
         omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
         return true;
     }
+
+    
 };
 
 std::unique_ptr<Pass> createMetamorphicPass(

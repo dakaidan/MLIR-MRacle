@@ -26,7 +26,9 @@ int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
 // the LLVM CodeGen opt level (0-3); -1 keeps the JIT's default. bbSections
 // overrides the code layout; BasicBlockSection::All emits every basic block
 // into its own section, preserving the module's block order in the generated
-// machine code (the default is None).
+// machine code (the default is None). It is honoured only on ELF targets;
+// on MachO/COFF the request is ignored because LLVM implements per-basic-
+// block sections for ELF alone.
 std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     std::unique_ptr<llvm::Module> module,
     std::string *error = nullptr,

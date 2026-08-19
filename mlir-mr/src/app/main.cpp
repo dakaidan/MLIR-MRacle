@@ -5,16 +5,15 @@
 #include <iostream>
 
 int main(int argc, char **argv) {
-    // Pin the OpenMP runtime to a fixed configuration before any parallel
-    // region can initialise it. GOMP_CPU_AFFINITY is read by libgomp,
-    // OMP_PROC_BIND by libomp; both are set so either runtime honours the
-    // pin. Values are forced so a pre-existing environment cannot change them.
+    // Fix the OpenMP runtime's team sizing before any parallel region can
+    // initialise it: dynamic adjustment is off so omp_set_num_threads stays
+    // authoritative. Values are forced so a pre-existing environment cannot
+    // change them.
     setenv("OMP_DYNAMIC", "false", 1);
     setenv("OMP_NUM_THREADS", "2", 1);
-    setenv("OMP_PROC_BIND", "close", 1);
-    setenv("GOMP_CPU_AFFINITY", "0 1", 1);
 
     mlir_mr::PipelineOptions opts;
+    bool legacyMode = false;
 
     int newArgc = 0;
     for (int i = 0; i < argc; ++i) {
@@ -22,6 +21,11 @@ int main(int argc, char **argv) {
             opts.seed = std::strtol(argv[i] + 7, nullptr, 10);
         } else if (std::strcmp(argv[i], "--run") == 0) {
             opts.straightMode = true;
+        } else if (std::strcmp(argv[i], "--legacy") == 0) {
+            legacyMode = true;
+        } else if (std::strcmp(argv[i], "--new-oracle") == 0) {
+            // explicit selector for the default mode; kept for compatibility
+            // with runner scripts
         } else if (std::strcmp(argv[i], "--emit-mlir") == 0) {
             opts.emitMLIR = true;
         } else if (std::strncmp(argv[i], "--reps=", 7) == 0) {
@@ -38,8 +42,6 @@ int main(int argc, char **argv) {
             opts.maxApply = std::strtol(argv[i] + 8, nullptr, 10);
         } else if (std::strncmp(argv[i], "--tsan=", 7) == 0) {
             opts.tsanPercent = std::strtol(argv[i] + 7, nullptr, 10);
-        } else if (std::strncmp(argv[i], "--jit-opt-level=", 16) == 0) {
-            opts.jitOptLevel = std::strtol(argv[i] + 16, nullptr, 10);
         } else if (std::strncmp(argv[i], "--campaign-dir=", 15) == 0) {
             opts.campaignDir = argv[i] + 15;
         } else if (std::strncmp(argv[i], "--threshold=", 12) == 0) {
@@ -56,9 +58,10 @@ int main(int argc, char **argv) {
 
     if (opts.multiFolder.empty() && argc < 2) {
         std::cerr << "usage: mlir-mr-opt [--seed=N] "
-                     "[--iter=N] [--emit-mlir] [--run] [--reps=N] "
+                     "[--iter=N] [--emit-mlir] [--run] [--legacy] "
+                     "[--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
-                     "[--tsan=PERCENT] [--jit-opt-level=N] "
+                     "[--tsan=PERCENT] "
                      "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "[--threshold=PCT] "
                      "[--reruns=N] [--max-runs=N] "
@@ -73,11 +76,6 @@ int main(int argc, char **argv) {
 
     if (opts.thresholdPct < 0 || opts.thresholdPct > 100) {
         std::cerr << "--threshold must be between 0 and 100\n";
-        return 1;
-    }
-
-    if (opts.jitOptLevel < -1 || opts.jitOptLevel > 3) {
-        std::cerr << "--jit-opt-level must be between 0 and 3\n";
         return 1;
     }
 
@@ -128,7 +126,15 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    mlir_mr::PipelineResult result = mlir_mr::runPipeline(opts);
+    if (legacyMode) {
+        mlir_mr::PipelineResult result = mlir_mr::runPipeline(opts);
+        std::cout << result.campaignDir << "\n";
+        mlir_mr::shutdownCore();
+        return 0;
+    }
+
+    // default mode is the new-oracle agitation pipeline
+    mlir_mr::PipelineResult result = mlir_mr::runNewOraclePipeline(opts);
     std::cout << result.campaignDir << "\n";
     mlir_mr::shutdownCore();
     return 0;

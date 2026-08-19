@@ -1,0 +1,274 @@
+#include "mlir-mr/oracle/new_oracle.h"
+
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <string>
+#include <vector>
+
+namespace mlir_mr {
+
+namespace {
+
+// p-value below which an outcome count is flagged as above the Poisson
+// upper bound of the expected count (mirrors oracle.cpp)
+constexpr double kStrongPValue = 1e-6;
+
+// expected count of a novel outcome (absent from the source set) under the
+// null hypothesis: at least a single chance occurrence, scaled up by a noise
+// floor so that rates measured on small batches stay plausible at large ones
+constexpr double kNovelExpected = 1.0;
+constexpr double kNoiseFloorRate = 1e-3;
+
+// regularised lower incomplete gamma P(a,x) = gamma(a,x)/Gamma(a): series for
+// x < a+1, continued fraction for the upper tail otherwise (mirrors oracle.cpp)
+double lowerIncompleteGamma(double a, double x) {
+    constexpr double kEps = 1e-15;
+    constexpr int kItMax = 200;
+    constexpr double kFpMin = 1e-300;
+    const double gln = std::lgamma(a);
+    if (x < a + 1.0) {
+        double ap = a;
+        double sum = 1.0 / a;
+        double del = sum;
+        for (int n = 0; n < kItMax; ++n) {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if (std::fabs(del) < std::fabs(sum) * kEps)
+                break;
+        }
+        return sum * std::exp(-x + a * std::log(x) - gln);
+    }
+    double b = x + 1.0 - a;
+    double c = 1.0 / kFpMin;
+    double d = 1.0 / b;
+    double h = d;
+    for (int i = 1; i <= kItMax; ++i) {
+        double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
+        b += 2.0;
+        d = an * d + b;
+        if (std::fabs(d) < kFpMin)
+            d = kFpMin;
+        c = b + an / c;
+        if (std::fabs(c) < kFpMin)
+            c = kFpMin;
+        d = 1.0 / d;
+        double del = d * c;
+        h *= del;
+        if (std::fabs(del - 1.0) < kEps)
+            break;
+    }
+    return 1.0 - std::exp(-x + a * std::log(x) - gln) * h;
+}
+
+// P(X > k) for X ~ Poisson(lambda) == scipy.stats.poisson.sf(k, lambda)
+double poissonSurvival(int64_t k, double lambda) {
+    if (k < 0)
+        return 1.0;
+    if (lambda <= 0.0)
+        return 0.0;
+    return lowerIncompleteGamma(static_cast<double>(k) + 1.0, lambda);
+}
+
+int64_t outcomeCount(const ObservedOutcomeSet &set, const JointOutcome &o) {
+    auto it = std::lower_bound(set.outcomes.begin(), set.outcomes.end(), o);
+    if (it == set.outcomes.end() || *it != o)
+        return 0;
+    size_t idx = static_cast<size_t>(std::distance(set.outcomes.begin(), it));
+    return idx < set.counts.size() ? set.counts[idx] : 0;
+}
+
+bool arityCompatible(const ObservedOutcomeSet &source,
+                     const ObservedOutcomeSet &transformed) {
+    return source.arityConsistent && transformed.arityConsistent &&
+           source.arity == transformed.arity;
+}
+
+// joins short deviation clauses into the verdict message
+std::string joinReasons(const std::vector<std::string> &reasons) {
+    std::string out;
+    for (size_t i = 0; i < reasons.size(); ++i) {
+        if (i > 0)
+            out += "; ";
+        out += reasons[i];
+    }
+    return out;
+}
+
+struct StateVerdict {
+    bool fail = false;
+    bool warn = false;
+    bool rerun = false;
+};
+
+// novel transformed state (absent from the source): a count above the
+// Poisson upper bound of the noise-floor expected count is significant; it
+// fails outright only when the outcome is also common (>= thresholdPct of
+// transformed runs). Any novel value is confirmed by a replay round before
+// the final verdict — the noise floor only decides fail vs replay, never
+// ok. Post-replay, a novel value always warns, however rare the count is.
+StateVerdict judgeNovelState(int64_t trCount, int64_t trTotal,
+                             int thresholdPct, bool postReruns) {
+    double expected = std::max(kNovelExpected, kNoiseFloorRate * trTotal);
+    bool significant =
+        poissonSurvival(trCount - 1, expected) < kStrongPValue;
+    if (significant && 100.0 * trCount / trTotal >= thresholdPct)
+        return {true, false, false};
+    if (!postReruns)
+        return {false, false, true};
+    return {false, true, false};
+}
+
+// source state missing from the transformed side: a common source state
+// (>= thresholdPct of source runs) fails only when its absence is also
+// Poisson-significant; a rarer one warns only when its absence is
+// significant, otherwise it is plausibly noise. Before the replay round the
+// significant absence triggers a rerun; after it the merged data decides
+// between warn and ok.
+StateVerdict judgeMissingState(int64_t srcCount, int64_t srcTotal,
+                               int64_t trTotal, int thresholdPct,
+                               bool postReruns) {
+    double expected = (static_cast<double>(srcCount) / srcTotal) * trTotal;
+    bool absenceSignificant = std::exp(-expected) < kStrongPValue;
+    if (100.0 * srcCount / srcTotal >= thresholdPct && absenceSignificant)
+        return {true, false, false};
+    if (!absenceSignificant)
+        return {false, false, false};
+    if (!postReruns)
+        return {false, false, true};
+    return {false, true, false};
+}
+
+// state present on both sides: a rare-in-source/common-in-transformed rate
+// crossing fails only when the count also exceeds the Poisson upper bound of
+// the source-predicted count; any other count outside the two-sided Poisson
+// range warns. The same check runs before and after the replay round, so a
+// post-replay verdict is judged on merged data.
+StateVerdict judgeSharedState(int64_t srcCount, int64_t srcTotal,
+                              int64_t trCount, int64_t trTotal,
+                              int thresholdPct) {
+    double expected = (static_cast<double>(srcCount) / srcTotal) * trTotal;
+    double trPct = 100.0 * trCount / trTotal;
+    double pHigh = poissonSurvival(trCount - 1, expected);
+    double pLow = 1.0 - poissonSurvival(trCount, expected);
+    if (100.0 * srcCount / srcTotal < thresholdPct && trPct >= thresholdPct &&
+        pHigh < kStrongPValue)
+        return {true, false, false};
+    if (pHigh < kStrongPValue || pLow < kStrongPValue)
+        return {false, true, false};
+    return {false, false, false};
+}
+
+} // namespace
+
+NewOracleResult newOracleCompare(const ExecutionResult &exec,
+                                 const NewOracleOptions &opts) {
+    NewOracleResult out;
+    const ObservedOutcomeSet &src = exec.sourceTotal;
+    const ObservedOutcomeSet &tr = exec.transformedTotal;
+
+    if (!arityCompatible(src, tr)) {
+        out.compare = {false, false,
+                       "FAIL: result arity mismatch: source arity " +
+                           std::to_string(src.arity) +
+                           " vs transformed arity " +
+                           std::to_string(tr.arity)};
+        return out;
+    }
+
+    // the single-thread probes are a determinism check for every relation:
+    // both sides must produce exactly the same single outcome
+    const ObservedOutcomeSet &srcST = exec.sourceSingleThreadTotal;
+    const ObservedOutcomeSet &trST = exec.transformedSingleThreadTotal;
+    bool singleMatch = srcST.outcomes.size() == 1 &&
+                       trST.outcomes.size() == 1 &&
+                       srcST.outcomes.front() == trST.outcomes.front();
+    if (!singleMatch) {
+        out.compare = {false, false, "FAIL: single-thread determinism mismatch"};
+        return out;
+    }
+
+    std::vector<JointOutcome> sourceOnly;
+    std::vector<JointOutcome> transformedOnly;
+    std::set_difference(src.outcomes.begin(), src.outcomes.end(),
+                        tr.outcomes.begin(), tr.outcomes.end(),
+                        std::back_inserter(sourceOnly));
+    std::set_difference(tr.outcomes.begin(), tr.outcomes.end(),
+                        src.outcomes.begin(), src.outcomes.end(),
+                        std::back_inserter(transformedOnly));
+
+    std::vector<std::string> failReasons;
+    std::vector<std::string> warnReasons;
+    std::vector<std::string> rerunReasons;
+    auto note = [&](const StateVerdict &v, std::string what) {
+        if (v.fail)
+            failReasons.push_back(std::move(what));
+        else if (v.warn)
+            warnReasons.push_back(std::move(what));
+        else if (v.rerun)
+            rerunReasons.push_back(std::move(what));
+    };
+
+    auto judgeMissing = [&](const JointOutcome &o) {
+        note(judgeMissingState(outcomeCount(src, o), src.totalRuns,
+                               tr.totalRuns, opts.thresholdPct,
+                               opts.postReruns),
+             "missing outcome");
+    };
+    auto judgeNovel = [&](const JointOutcome &o) {
+        note(judgeNovelState(outcomeCount(tr, o), tr.totalRuns,
+                             opts.thresholdPct, opts.postReruns),
+             "novel outcome");
+    };
+    auto judgeShared = [&](const JointOutcome &o) {
+        note(judgeSharedState(outcomeCount(src, o), src.totalRuns,
+                              outcomeCount(tr, o), tr.totalRuns,
+                              opts.thresholdPct),
+             "rate shift on shared outcome");
+    };
+
+    switch (opts.relation) {
+    case OutcomeRelation::Subset:
+        for (const auto &o : transformedOnly)
+            judgeNovel(o);
+        break;
+    case OutcomeRelation::Superset:
+        for (const auto &o : sourceOnly)
+            judgeMissing(o);
+        break;
+    default:
+        for (const auto &o : sourceOnly)
+            judgeMissing(o);
+        for (const auto &o : transformedOnly)
+            judgeNovel(o);
+        for (const auto &o : src.outcomes)
+            if (outcomeCount(tr, o) > 0)
+                judgeShared(o);
+        break;
+    }
+
+    if (!failReasons.empty()) {
+        out.compare = {false, false,
+                       "FAIL: behavioural change detected: " +
+                           joinReasons(failReasons)};
+        return out;
+    }
+    if (!rerunReasons.empty()) {
+        out.compare = {true, false,
+                       "rare outcome present; replay pending: " +
+                           joinReasons(rerunReasons)};
+        out.needsRerun = true;
+        return out;
+    }
+    if (!warnReasons.empty()) {
+        out.compare = {true, true,
+                       "WARN: outcome rate shift detected: " +
+                           joinReasons(warnReasons)};
+        return out;
+    }
+    out.compare = {true, false, ""};
+    return out;
+}
+
+} // namespace mlir_mr

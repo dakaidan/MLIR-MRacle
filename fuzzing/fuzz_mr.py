@@ -204,8 +204,9 @@ def main():
     )
     parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mr_opt")
     parser.add_argument(
-        "--opt-level", type=int, default=3,
-        help="optimisation level for JIT'd programs (default 3)"
+        "--legacy", action="store_true",
+        help="legacy single-thread-group pipeline instead of the default "
+             "new-oracle agitation sweep"
     )
     parser.add_argument(
         "--no-cache", action="store_true",
@@ -258,10 +259,11 @@ def main():
         cmd.append(f"--iter={args.iter}")
         cmd.append(f"--apply={args.apply}")
         cmd.append(f"--tsan={args.tsan}")
-        cmd.append(f"--jit-opt-level={args.opt_level}")
         cmd.append(f"--threshold={args.threshold}")
         cmd.append(f"--reruns={args.reruns}")
         cmd.append(f"--max-runs={args.max_runs}")
+    if args.legacy:
+        cmd.append("--legacy")
     transforms = []
     for value in args.transform:
         transforms.extend(

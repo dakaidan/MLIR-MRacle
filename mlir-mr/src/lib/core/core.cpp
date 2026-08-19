@@ -1,13 +1,18 @@
 #include "mlir-mr/core/core.h"
 #include "mlir-mr/backend/jit/jit.h"
 #include "mlir-mr/backend/lowering/lowering.h"
+#include "mlir-mr/execution/execution.h"
 #include "mlir-mr/io/io.h"
+#include "mlir-mr/oracle/new_oracle.h"
 #include "mlir-mr/oracle/oracle.h"
+#include "mlir-mr/passes/MetamorphicPass.h"
 
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Support/Error.h"
@@ -39,6 +44,11 @@ static std::string gCampaignDir;
 
 // the 1-thread group is a determinism check, so a small budget suffices
 static constexpr int kDeterminismReps = 32;
+
+// the legacy --tsan pipeline and execution mode keep the JIT's default
+// CodeGen opt level; the new-oracle agitation sweep randomises opt levels
+// per compiled binary instead
+static constexpr int kLegacyJitOptLevel = -1;
 
 // the first few warns of a source file are verified before they are
 // reported: the source baseline is retested (up to the per-level cap) and
@@ -110,6 +120,17 @@ static std::string pickInputFile(const PipelineOptions &opts,
     return multiFiles[dist(fileRng)];
 }
 
+// per-run seed: fixed when --seed is given, otherwise derived
+// deterministically from the run index so a campaign is reproducible
+// without a fixed seed and never draws fresh entropy
+static int runSeedFor(const PipelineOptions &opts, int runIdx) {
+    if (opts.seed >= 0)
+        return opts.seed;
+    uint32_t h = 0x9e3779b9u +
+                 static_cast<uint32_t>(runIdx) * 2654435761u;
+    return static_cast<int>(h & 0x7FFFFFFFu);
+}
+
 // creates (or reuses) the campaign folder used by both pipelines
 static void createCampaignDir(const PipelineOptions &opts) {
     if (!opts.campaignDir.empty()) {
@@ -128,9 +149,12 @@ static void createCampaignDir(const PipelineOptions &opts) {
 
 // writes the artifacts of a single run under
 // <campaignDir>/<status>/run<N>_seed<S>/ so a long campaign publishes each
-// run's output as it completes instead of buffering everything until the end
+// run's output as it completes instead of buffering everything until the end.
+// unionFormat selects the new-oracle run_info.json layout (union outcome sets
+// plus per-binary breakdown); the default writes the thread-group layout.
 static void saveRunArtifacts(const RunInfo &run, const std::string &status,
-                             const std::string &campaignDir) {
+                             const std::string &campaignDir,
+                             bool unionFormat = false) {
     std::filesystem::path dir =
         std::filesystem::path(campaignDir) / status /
         ("run" + std::to_string(run.runNumber) + "_seed" +
@@ -154,7 +178,8 @@ static void saveRunArtifacts(const RunInfo &run, const std::string &status,
 
     std::string infoBuf;
     llvm::raw_string_ostream infoOs(infoBuf);
-    printJson(runInfoToStatusJson(run), infoOs);
+    printJson(unionFormat ? runInfoToUnionJson(run) : runInfoToStatusJson(run),
+              infoOs);
     infoOs << "\n";
     infoOs.flush();
     std::ofstream infoFile((dir / "run_info.json").string());
@@ -235,6 +260,27 @@ static bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
         return false;
     setup.runInfo.error.clear();
     setup.runInfo.transformedMLIR = dumpMLIR(*transformedModule);
+    return true;
+}
+
+// Applies the jitter transform to a module: the pass runs with the fixed
+// transform name and the run's own seed, so both sides of the comparison
+// receive the same seeded RNG stream and the jitter density stays symmetric.
+static bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module,
+                        int seed, std::string &error) {
+    mlir::ScopedDiagnosticHandler diagHandler(
+        &ctx, [&](mlir::Diagnostic &diag) {
+            if (!error.empty())
+                error += "; ";
+            error += diag.str();
+            return mlir::success();
+        });
+    error = "jitter pass failed";
+    mlir::PassManager pm(&ctx, mlir::ModuleOp::getOperationName());
+    pm.addPass(mlir::createMetamorphicPass(seed, nullptr, "insert-jitter", 1));
+    if (mlir::failed(pm.run(module)))
+        return false;
+    error.clear();
     return true;
 }
 
@@ -533,8 +579,7 @@ static void clearBaseline(SourceMemo &memo, const std::string &baseKey,
 // processes of the same source skip lowering and translation entirely
 static bool memoizeSource(mlir::MLIRContext &mlirCtx,
                           mlir::ModuleOp module, const std::string &sourceMLIR,
-                          SourceMemo &memo, std::string &error,
-                          int jitOptLevel) {
+                          SourceMemo &memo, std::string &error) {
     memo.tsan = nullptr;
     memo.plain = nullptr;
     memo.tsanModule.reset();
@@ -560,7 +605,7 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
     std::string compileError;
     memo.plain = compileLLVMModuleToFunction(
         llvm::CloneModule(*memo.tsanModule), &compileError, false,
-        jitOptLevel);
+        kLegacyJitOptLevel);
     if (!memo.plain) {
         error = "JIT compile error (original): " + compileError;
         return false;
@@ -571,8 +616,7 @@ static bool memoizeSource(mlir::MLIRContext &mlirCtx,
 // returns the TSan-instrumented source binary, compiling it on first use and
 // keeping it alive for later runs of the same file
 static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
-                                                              std::string &error,
-                                                              int jitOptLevel) {
+                                                              std::string &error) {
     if (memo.tsan)
         return memo.tsan;
     if (!memo.tsanModule) {
@@ -581,7 +625,8 @@ static std::function<std::vector<int64_t>()> sourceTsanBinary(SourceMemo &memo,
     }
     std::string compileError;
     memo.tsan = compileLLVMModuleToFunction(std::move(memo.tsanModule),
-                                            &compileError, true, jitOptLevel);
+                                            &compileError, true,
+                                            kLegacyJitOptLevel);
     if (!memo.tsan)
         memo.tsanError = "JIT compile error (original): " + compileError;
     if (memo.tsan)
@@ -595,7 +640,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
                          int maxApply, int tsanPercent, int reps,
                          int retestReps, int maxSourceReps,
-                         int thresholdPct, int jitOptLevel) {
+                         int thresholdPct) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
     std::vector<PendingBaseline> pendingBaselines;
 
@@ -640,7 +685,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         SourceMemo fresh;
         if (!memoizeSource(setup.mlirContext, *originalModule,
                            setup.runInfo.sourceMLIR, fresh,
-                           setup.runInfo.error, jitOptLevel))
+                           setup.runInfo.error))
             return setup.runInfo;
         memo = std::move(fresh);
     }
@@ -663,7 +708,7 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
     // first without paying for instrumentation it does not need.
     auto transfPlain = compileLLVMModuleToFunction(
         llvm::CloneModule(*moduleToTransformLLVM), &compileError, false,
-        jitOptLevel);
+        kLegacyJitOptLevel);
     if (!transfPlain) {
         setup.runInfo.error =
             "JIT compile error (transformed): " + compileError;
@@ -672,14 +717,14 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
 
     std::function<std::vector<int64_t>()> origTsan, transfTsan;
     if (useTsan) {
-        origTsan = sourceTsanBinary(memo, compileError, jitOptLevel);
+        origTsan = sourceTsanBinary(memo, compileError);
         if (!origTsan) {
             setup.runInfo.error = compileError;
             return setup.runInfo;
         }
         transfTsan = compileLLVMModuleToFunction(
             llvm::CloneModule(*moduleToTransformLLVM), &compileError, true,
-            jitOptLevel);
+            kLegacyJitOptLevel);
         if (!transfTsan) {
             setup.runInfo.error =
                 "JIT compile error (transformed): " + compileError;
@@ -709,7 +754,8 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
         // and never touches the cache.
         bool tsanVariant = t != 1 && useTsan;
         std::string baseKey =
-            std::to_string(t) + ":o" + std::to_string(jitOptLevel) +
+            std::to_string(t) + ":o" +
+            std::to_string(kLegacyJitOptLevel) +
             (tsanVariant ? ":tsan" : "");
         int srcRuns;
         ObservedOutcomeSet srcSet;
@@ -842,10 +888,11 @@ static RunInfo runSingle(const std::string &inputFile, int seed,
 
 // straight execution mode: parse, lower, JIT and run the source program at
 // every team size without any transformation or comparison. Joint outcome
-// frequencies are recorded per thread count.
+// frequencies are recorded per thread count. Every call compiles and runs
+// fresh: execution mode is a probe of the run, not a comparison, so nothing
+// is memoised or cached across runs.
 static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
-                                        int runIdx, int reps,
-                                        int jitOptLevel) {
+                                        int runIdx, int reps) {
     ExecutionRunResult result;
     result.runNumber = runIdx;
     result.seed = seed;
@@ -857,45 +904,26 @@ static ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     mlir::OwningOpRef<mlir::ModuleOp> module;
     if (!parseModuleFile(inputFile, mlirCtx, module, result.error))
         return result;
-    std::string sourceMLIR = dumpMLIR(*module);
 
-    // reuse the compiled source binary and baseline outcome sets kept alive
-    // for the whole pipeline; the first run of a file compiles and executes
-    // the full per-thread budget, later runs of the same file reuse it. A new
-    // memo is built off to the side and only installed on success.
-    SourceMemo &memo = gSourceMemo[inputFile];
-    if (memo.sourceMLIR != sourceMLIR) {
-        SourceMemo fresh;
-        if (!memoizeSource(mlirCtx, *module, sourceMLIR, fresh,
-                           result.error, jitOptLevel))
-            return result;
-        memo = std::move(fresh);
+    llvm::LLVMContext llvmCtx;
+    std::unique_ptr<llvm::Module> llvmModule;
+    if (!lowerAndTranslate(*module, mlirCtx, llvmCtx, "source", nullptr,
+                           &result.llvmIR, llvmModule, result.error))
+        return result;
+
+    std::string compileError;
+    auto fn = compileLLVMModuleToFunction(std::move(llvmModule), &compileError,
+                                          false, kLegacyJitOptLevel);
+    if (!fn) {
+        result.error = "JIT compile error: " + compileError;
+        return result;
     }
-    result.llvmIR = memo.sourceJitLLVM;
 
     for (int t : kThreadCounts) {
-        ObservedOutcomeSet set;
-        int runs;
-        std::string baseKey =
-            std::to_string(t) + ":o" + std::to_string(jitOptLevel);
-        
-        auto baseIt = memo.baselines.find(baseKey);
-        if (baseIt != memo.baselines.end()) {
-            set = baseIt->second;
-            runs = set.totalRuns;
-        } else if (loadBaselineCache(memo.sourceHash, baseKey, reps, set)) {
-            runs = set.totalRuns;
-            memo.baselines[baseKey] = set;
-        } else {
-            set = collectOutcomeSet(memo.plain, reps, t);
-            runs = reps;
-            memo.baselines[baseKey] = set;
-            saveBaselineCache(memo.sourceHash, baseKey, reps, set);
-        }
-
+        ObservedOutcomeSet set = collectOutcomeSet(fn, reps, t);
         ExecutionThreadResult tr;
         tr.numThreads = t;
-        tr.runs = runs;
+        tr.runs = reps;
         tr.outcomes = std::move(set.outcomes);
         tr.counts = std::move(set.counts);
         result.threadResults.push_back(std::move(tr));
@@ -926,14 +954,18 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
             result.campaignDir = gCampaignDir;
             return result;
         }
-    } else {
-        files.push_back(opts.inputFile);
     }
-    for (size_t i = 0; i < files.size(); ++i) {
-        int runSeed = opts.seed >= 0 ? opts.seed : 42;
-        ExecutionRunResult run = executeSingle(
-            files[i], runSeed, opts.runNumber + static_cast<int>(i),
-            opts.reps, opts.jitOptLevel);
+
+    // each run is an independent probe: the file is picked per run from the
+    // run seed (matching the other pipelines), and executeSingle recompiles
+    // from scratch so repeated runs of one file exercise fresh JIT state
+    for (int i = 0; i < opts.numRuns; ++i) {
+        int runIdx = opts.runNumber + i;
+        int runSeed = runSeedFor(opts, runIdx);
+        std::string inputFile = pickInputFile(opts, files, runIdx, runSeed);
+
+        ExecutionRunResult run =
+            executeSingle(inputFile, runSeed, runIdx, opts.reps);
         saveExecutionArtifacts(run, gCampaignDir);
         result.runs.push_back(std::move(run));
     }
@@ -941,6 +973,188 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
     JsonValue arr = jsonArray();
     for (const auto &run : result.runs)
         jsonPush(arr, executionRunToJson(run));
+    writeResultJson(arr, gCampaignDir);
+    result.campaignDir = gCampaignDir;
+    return result;
+}
+
+// --new-oracle mode single run: applies the requested transforms, adds
+// symmetric jitter delay chains to both modules, lowers and translates both
+// modules directly (no persistent cache, no source memo), runs the agitation
+// sweep through the harness, then replays rare states in rounds of --reruns
+// until they resolve or the total source runs across all binaries reach the
+// --max-runs cap. The verdict is the final post-replay comparison, judged on
+// merged data.
+static RunInfo runNewOracleSingle(const std::string &inputFile, int seed,
+                                  int runIdx, const PipelineOptions &opts) {
+    MLIRSetup setup(seed, runIdx, opts.transform, opts.maxApply);
+
+    mlir::OwningOpRef<mlir::ModuleOp> originalModule;
+    mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
+    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
+        return setup.runInfo;
+
+    // jitter widens the race windows on both sides with the same seed, so
+    // rare states surface more often without biasing the comparison
+    if (!applyJitter(setup.mlirContext, *originalModule, seed,
+                     setup.runInfo.error) ||
+        !applyJitter(setup.mlirContext, *moduleToTransform, seed,
+                     setup.runInfo.error))
+        return setup.runInfo;
+
+    // snapshot both jittered modules before lowering overwrites them
+    setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
+    setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
+
+    std::unique_ptr<llvm::Module> sourceLLVM;
+    if (!lowerAndTranslate(*originalModule, setup.mlirContext,
+                           setup.llvmContext, "source", nullptr,
+                           &setup.runInfo.sourceJitLLVM, sourceLLVM,
+                           setup.runInfo.error))
+        return setup.runInfo;
+
+    std::unique_ptr<llvm::Module> transformedLLVM;
+    if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
+                           setup.llvmContext, "transformed",
+                           &setup.runInfo.loweredMLIR,
+                           &setup.runInfo.jitLLVM, transformedLLVM,
+                           setup.runInfo.error))
+        return setup.runInfo;
+
+    ExecutionOptions execOpts;
+    execOpts.seed = static_cast<uint32_t>(seed);
+    execOpts.runsPerBinary = opts.reps;
+    execOpts.singleThreadRuns = kDeterminismReps;
+    execOpts.compile.enableTsan = false;
+    execOpts.compile.shuffleSeed = static_cast<uint32_t>(seed);
+    ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
+                                               execOpts);
+    if (!exec.error.empty()) {
+        setup.runInfo.error = exec.error;
+        return setup.runInfo;
+    }
+
+    NewOracleOptions oracleOpts;
+    oracleOpts.relation = setup.runInfo.relation;
+    oracleOpts.thresholdPct = opts.thresholdPct;
+
+    // --max-runs caps the total source executions across all agitation
+    // binaries; the replay budget is what remains of the cap after the
+    // initial sweep. rerunAllBinaries adds `extra` runs per binary, so each
+    // replay round spends binaryCount * extra source executions. An ok
+    // verdict stops immediately; a warn or a pending rare-state rerun keeps
+    // replaying (re-checking on merged data) until it resolves to ok/fail or
+    // the cap is reached; a fail never replays.
+    int64_t binaryCount =
+        std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
+    NewOracleResult verdict = newOracleCompare(exec, oracleOpts);
+    int replayRound = 0;
+    while ((verdict.needsRerun || verdict.compare.warn) &&
+           exec.sourceTotal.totalRuns < opts.maxSourceReps) {
+        int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
+        int extra = static_cast<int>(std::min<int64_t>(
+            opts.retestReps, budget / binaryCount));
+        if (extra <= 0)
+            break;
+        // each round re-agitates with its own seed derived directly from the
+        // run seed (round 1 -> seed+1, round 2 -> seed+2, ...), so the whole
+        // replay sequence is reproducible from --seed alone and every round
+        // draws a fresh team-size mix
+        rerunAllBinaries(exec, extra,
+                         static_cast<uint32_t>(seed) +
+                             static_cast<uint32_t>(++replayRound),
+                         execOpts.configCount);
+        verdict = newOracleCompare(exec, oracleOpts);
+    }
+    oracleOpts.postReruns = true;
+    verdict = newOracleCompare(exec, oracleOpts);
+
+    // the outcome set is the aggregate over the whole agitation sweep
+    // (thread counts, opt levels, code layout), so no single team size
+    // is reported; the run-level union sets carry the verdict data and a
+    // concise per-binary breakdown sits alongside
+    setup.runInfo.sourceRuns = exec.sourceTotal.totalRuns;
+    setup.runInfo.transformedRuns = exec.transformedTotal.totalRuns;
+    setup.runInfo.sourceOutcomes = std::move(exec.sourceTotal.outcomes);
+    setup.runInfo.sourceCounts = std::move(exec.sourceTotal.counts);
+    setup.runInfo.transformedOutcomes =
+        std::move(exec.transformedTotal.outcomes);
+    setup.runInfo.transformedCounts =
+        std::move(exec.transformedTotal.counts);
+
+    int srcCount = static_cast<int>(exec.sourceBinaries.size());
+    for (size_t i = 0; i < exec.binaryResults.size(); ++i) {
+        const auto &br = exec.binaryResults[i];
+        const CompiledBinary *bin =
+            static_cast<int>(i) < srcCount
+                ? &exec.sourceBinaries[i]
+                : &exec.transformedBinaries[i - srcCount];
+        BinaryOutcomeResult bo;
+        bo.side = br.side;
+        bo.compileIndex = bin->compileIndex;
+        bo.jitOptLevel = bin->jitOptLevel;
+        bo.runs = static_cast<int>(br.threadedTotal.totalRuns);
+        bo.outcomes = br.threadedTotal.outcomes;
+        bo.counts = br.threadedTotal.counts;
+        setup.runInfo.binaryOutcomes.push_back(std::move(bo));
+    }
+
+    if (!verdict.compare.ok)
+        setup.runInfo.error = verdict.compare.message;
+    else if (verdict.compare.warn)
+        setup.runInfo.warn = verdict.compare.message;
+    return setup.runInfo;
+}
+
+// core pipeline function for the default agitation-sweep oracle: runs the
+// new-oracle comparison over transformed vs source modules with rare-state
+// replay. Each run is published to the campaign folder as it completes.
+PipelineResult runNewOraclePipeline(const PipelineOptions &opts) {
+    PipelineResult result;
+    result.runs.reserve(opts.numRuns);
+
+    createCampaignDir(opts);
+    std::error_code ec;
+    for (const char *sub : {"fail", "warn", "ok"})
+        std::filesystem::create_directories(
+            std::filesystem::path(gCampaignDir) / sub, ec);
+
+    std::vector<std::string> multiFiles;
+    if (!opts.multiFolder.empty()) {
+        multiFiles = collectMLIRFiles(opts.multiFolder);
+        if (multiFiles.empty()) {
+            RunInfo errInfo;
+            errInfo.error = "no .mlir files in " + opts.multiFolder;
+            errInfo.runNumber = opts.runNumber;
+            saveRunArtifacts(errInfo, "fail", gCampaignDir,
+                             /*unionFormat=*/true);
+            JsonValue errArr = jsonArray();
+            jsonPush(errArr, runInfoToJson(errInfo));
+            writeResultJson(errArr, gCampaignDir);
+            result.runs.push_back(errInfo);
+            result.campaignDir = gCampaignDir;
+            return result;
+        }
+    }
+
+    for (int i = 0; i < opts.numRuns; ++i) {
+        int runIdx = opts.runNumber + i;
+        int runSeed = runSeedFor(opts, runIdx);
+        std::string inputFile =
+            pickInputFile(opts, multiFiles, runIdx, runSeed);
+
+        RunInfo info = runNewOracleSingle(inputFile, runSeed, runIdx, opts);
+
+        std::string status = runStatusString(info);
+        const char *statusDir = status == "ERROR" ? "fail"
+                               : status == "WARN" ? "warn" : "ok";
+        saveRunArtifacts(info, statusDir, gCampaignDir, /*unionFormat=*/true);
+        result.runs.push_back(std::move(info));
+    }
+
+    JsonValue arr = jsonArray();
+    for (const auto &run : result.runs)
+        jsonPush(arr, runInfoToJson(run));
     writeResultJson(arr, gCampaignDir);
     result.campaignDir = gCampaignDir;
     return result;
@@ -979,14 +1193,9 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
         }
     }
 
-    std::random_device rd;
-    std::mt19937 rng(rd());
-
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
-        int runSeed = (opts.seed >= 0)
-                          ? opts.seed
-                          : static_cast<int>(rng() & 0x7FFFFFFF);
+        int runSeed = runSeedFor(opts, runIdx);
 
         std::string inputFile = pickInputFile(opts, multiFiles, runIdx, runSeed);
 
@@ -997,7 +1206,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
                                  opts.transform, opts.maxApply,
                                  opts.tsanPercent, opts.reps,
                                  opts.retestReps, opts.maxSourceReps,
-                                 opts.thresholdPct, opts.jitOptLevel);
+                                 opts.thresholdPct);
 
         // publish the run into its status folder as it completes; each run's
         // artifacts are written exactly once, so incremental output costs no
@@ -1077,13 +1286,9 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
         }
     }
 
-    std::random_device rd;
-    std::mt19937 rng(rd());
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
-        int runSeed = (opts.seed >= 0)
-                          ? opts.seed
-                          : static_cast<int>(rng() & 0x7FFFFFFF);
+        int runSeed = runSeedFor(opts, runIdx);
         std::string inputFile =
             pickInputFile(opts, multiFiles, runIdx, runSeed);
         RunInfo run = emitSingle(inputFile, runSeed, runIdx, opts.transform,

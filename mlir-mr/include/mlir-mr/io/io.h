@@ -69,6 +69,10 @@ JsonValue runInfoToJson(const RunInfo &info);
 // renders a run with thread results for the run_info.json artifact
 JsonValue runInfoToStatusJson(const RunInfo &info);
 
+// renders a new-oracle run with union outcome sets and a concise per-binary
+// breakdown for the run_info.json artifact
+JsonValue runInfoToUnionJson(const RunInfo &info);
+
 // renders an execution-mode run with grouped thread results for result.json
 JsonValue executionRunToJson(const ExecutionRunResult &run);
 

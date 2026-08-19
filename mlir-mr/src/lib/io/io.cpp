@@ -336,7 +336,9 @@ std::string runMessage(const RunInfo &info) {
     for (const auto &tg : info.threadResults)
         if (tg.status != "OK")
             return tg.message;
-    return info.error;
+    if (!info.error.empty())
+        return info.error;
+    return info.warn;
 }
 
 JsonValue relationToJson(OutcomeRelation relation) {
@@ -375,6 +377,8 @@ std::string runStatusString(const RunInfo &info) {
     for (const auto &tg : info.threadResults)
         if (tg.status == "WARN")
             return "WARN";
+    if (!info.warn.empty())
+        return "WARN";
     return "OK";
 }
 
@@ -399,6 +403,46 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
     for (const auto &tg : info.threadResults)
         jsonPush(threads, threadResultToJson(tg));
     jsonPut(obj, "thread_results", std::move(threads));
+    return obj;
+}
+
+JsonValue runInfoToUnionJson(const RunInfo &info) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "run", jsonInt(info.runNumber));
+    jsonPut(obj, "file", jsonString(info.file));
+    jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
+    jsonPut(obj, "relation", relationToJson(info.relation));
+
+    std::string status = runStatusString(info);
+    jsonPut(obj, "status", jsonString(status));
+
+    std::string message = runMessage(info);
+    if (!message.empty())
+        jsonPut(obj, "message", jsonString(message));
+
+    jsonPut(obj, "seed", jsonInt(info.seed));
+    jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
+
+    jsonPut(obj, "source_runs", jsonInt(info.sourceRuns));
+    jsonPut(obj, "transformed_runs", jsonInt(info.transformedRuns));
+    jsonPut(obj, "source_outcomes",
+            outcomeListToJson(info.sourceOutcomes, info.sourceCounts));
+    jsonPut(obj, "transformed_outcomes",
+            outcomeListToJson(info.transformedOutcomes,
+                              info.transformedCounts));
+
+    JsonValue binaries = jsonArray();
+    for (const auto &b : info.binaryOutcomes) {
+        JsonValue entry = jsonObject();
+        jsonPut(entry, "side", jsonString(b.side));
+        jsonPut(entry, "compile_index", jsonInt(b.compileIndex));
+        jsonPut(entry, "jit_opt_level", jsonInt(b.jitOptLevel));
+        jsonPut(entry, "runs", jsonInt(b.runs));
+        jsonPut(entry, "outcomes",
+                outcomeListToJson(b.outcomes, b.counts));
+        jsonPush(binaries, std::move(entry));
+    }
+    jsonPut(obj, "binary_results", std::move(binaries));
     return obj;
 }
 
