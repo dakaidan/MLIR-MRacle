@@ -60,7 +60,7 @@ RUN cmake -G Ninja \
 RUN if [ "$BUILD_CONQUER_OPT" = "ON" ]; then \
       cmake --build build --target conquer-opt -j "$(nproc)"; \
     else \
-      cmake --build build --target mlir-mr-smoke -j "$(nproc)"; \
+      cmake --build build --target mlir_mracle-smoke -j "$(nproc)"; \
     fi
 
 ENV PATH="/workspace/build:/workspace/build/bin:${PATH}" \

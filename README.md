@@ -5,7 +5,7 @@ Development environment for metamorphic testing of MLIR compiler infrastructure,
 ## Repository layout
 
 - `conquer-opt/`: the existing C++ MLIR/TOSA quantisation compiler and the pinned IREE/LLVM/MLIR dependency setup.
-- `mlir-mr/`: an initially empty, MLIR-linked CMake library for reusable metamorphic transforms and test infrastructure.
+- `mlir-mracle/`: an initially empty, MLIR-linked CMake library for reusable metamorphic transforms and test infrastructure.
 - `fuzzing/`: scratch space and conventions for generators, AFL++ harnesses, corpora, findings, and reduced failures.
 
 ## Setup
@@ -32,7 +32,7 @@ cmake -G Ninja -S . -B build \
 cmake --build build --target conquer-opt
 ```
 
-See `mlir-mr/README.md` for the library boundary and `fuzzing/README.md` for
+See `mlir-mracle/README.md` for the library boundary and `fuzzing/README.md` for
 the experimental-tooling workflow.
 
 ## Docker build modes
@@ -43,7 +43,7 @@ Running the image without a command executes the smoke test and exits:
 docker run --rm mlir-metamorphic-testing
 ```
 
-Build only the `mlir_mr` target and shared MLIR/IREE dependencies:
+Build only the `mlir_mracle` target and shared MLIR/IREE dependencies:
 
 ```bash
 docker build --build-arg BUILD_CONQUER_OPT=OFF -t mlir-metamorphic-testing .

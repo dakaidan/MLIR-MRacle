@@ -71,7 +71,7 @@ fuzzing/findings/
 
 fuzzing/tools/
 
-# Failed-run artifacts from mlir-mr-opt.
+# Failed-run artifacts from mlir_mracle-opt.
 logs/
 
 llvm-project/build/

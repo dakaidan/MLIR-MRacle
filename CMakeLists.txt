@@ -22,4 +22,4 @@ target_include_directories(llvm_mlir_headers INTERFACE
 # ConQUER owns the pinned IREE/LLVM/MLIR setup. Adding it first makes those
 # CMake targets available to the independent metamorphic-testing subproject.
 # add_subdirectory(conquer-opt)
-add_subdirectory(mlir-mr)
+add_subdirectory(mlir-mracle)

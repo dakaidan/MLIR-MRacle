@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BINARY_NAME = "mlir_mr_opt"
+BINARY_NAME = "mlir_mracle_opt"
 CACHE_DIR = PROJECT_ROOT / "cache"
 EXECUTABLE_CACHE_DIR = CACHE_DIR / "executables"
 
@@ -27,7 +27,7 @@ SANITIZER_PATTERNS = [
 
 
 def build_dir_for(sanitizers):
-    env = os.environ.get("MLIR_MR_BUILD_DIR")
+    env = os.environ.get("MLIR_MRACLE_BUILD_DIR")
     if env:
         return Path(env)
     if sanitizers == "thread":
@@ -46,15 +46,15 @@ def sanitizer_build_suffix(sanitizers):
 def candidate_paths_for(sanitizers):
     build_dir = build_dir_for(sanitizers)
     return [
-        build_dir / "mlir-mr" / "src" / "app" / BINARY_NAME,
+        build_dir / "mlir-mracle" / "src" / "app" / BINARY_NAME,
         build_dir / "bin" / BINARY_NAME,
         build_dir / BINARY_NAME,
-        build_dir / "mlir-mr" / BINARY_NAME,
+        build_dir / "mlir-mracle" / BINARY_NAME,
     ]
 
 
 def find_binary(sanitizers="thread"):
-    override = os.environ.get("MLIR_MR_OPT")
+    override = os.environ.get("MLIR_MRACLE_OPT")
     if override:
         return Path(override)
     for path in candidate_paths_for(sanitizers):
@@ -63,11 +63,11 @@ def find_binary(sanitizers="thread"):
     return None
 
 
-# fingerprints the mlir-mr source tree so cached executables are invalidated
+# fingerprints the mlir_mracle source tree so cached executables are invalidated
 # when the tool itself changes
 def source_fingerprint():
     hasher = hashlib.sha256()
-    for path in sorted((PROJECT_ROOT / "mlir-mr").rglob("*")):
+    for path in sorted((PROJECT_ROOT / "mlir-mracle").rglob("*")):
         if not path.is_file():
             continue
         if "build" in path.parts or path.suffix in (".o", ".a", ".d"):
@@ -101,8 +101,8 @@ def build_binary(opt_level=2, sanitizers="thread"):
         return cached
     build_dir = build_dir_for(sanitizers)
     config = [cmake, "-S", str(PROJECT_ROOT), "-B", str(build_dir),
-              f"-DMLIR_MR_OPT_LEVEL={opt_level}",
-              f"-DMLIR_MR_SANITIZERS={sanitizers}"]
+              f"-DMLIR_MRACLE_OPT_LEVEL={opt_level}",
+              f"-DMLIR_MRACLE_SANITIZERS={sanitizers}"]
     if not (build_dir / "CMakeCache.txt").exists():
         config[1:1] = ["-G", "Ninja"]
     subprocess.run(config, check=True)
@@ -136,7 +136,7 @@ def save_sanitizer_log(campaign_dir, stderr_text):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the mlir-mr-opt metamorphic pass pipeline."
+        description="Run the mlir_mracle-opt metamorphic pass pipeline."
     )
     parser.add_argument(
         "file", nargs="?", help="path to a single .mlir file"
@@ -202,7 +202,7 @@ def main():
         "--max-runs", type=int, default=100000,
         help="hard cap for source runs per baseline (default 100000)"
     )
-    parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mr_opt")
+    parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mracle_opt")
     parser.add_argument(
         "--legacy", action="store_true",
         help="legacy single-thread-group pipeline instead of the default "
@@ -282,7 +282,7 @@ def main():
     # cache regardless of the working directory; --no-cache passes an empty
     # value, which the tool treats as "no disk caching"
     env = dict(os.environ)
-    env["MLIR_MR_CACHE_DIR"] = "" if args.no_cache else str(CACHE_DIR / "v2")
+    env["MLIR_MRACLE_CACHE_DIR"] = "" if args.no_cache else str(CACHE_DIR / "v2")
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sanitizer_hits = scan_sanitizer_output(result.stderr)
 

@@ -1,0 +1,15 @@
+# Apple clang does not auto-detect Homebrew's libomp; hint FindOpenMP when present.
+if(APPLE AND NOT OpenMP_ROOT)
+    foreach(dir /opt/homebrew/opt/libomp /usr/local/opt/libomp)
+        if(EXISTS "${dir}/lib" AND EXISTS "${dir}/include/omp.h")
+            set(OpenMP_ROOT "${dir}")
+            break()
+        endif()
+    endforeach()
+endif()
+find_package(OpenMP REQUIRED)
+
+add_executable(mlir_mracle_opt main.cpp)
+target_compile_options(mlir_mracle_opt PRIVATE -fsanitize=thread)
+target_link_options(mlir_mracle_opt PRIVATE -fsanitize=thread)
+target_link_libraries(mlir_mracle_opt PRIVATE MLIRMRACLE::mlir_mracle OpenMP::OpenMP_CXX)
