@@ -1,8 +1,6 @@
-# MLIR Metamorphic Testing
+# MLIR-MRacle
 
-Metamorphic testing for MLIR concurrency programs: apply semantics-preserving
-transformations, run both sides under an OpenMP agitation sweep, and compare
-the observed outcome distributions with a statistical oracle.
+A metamorphic testing approach for OpenMP concurrency programs
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/language-C%2B%2B23-informational.svg)]()
@@ -12,30 +10,42 @@ the observed outcome distributions with a statistical oracle.
 
 Given a concurrent MLIR program, the harness:
 
-1. clones the module and applies one or more seeded, semantics-preserving
-   transformations (the metamorphic relations, "mracle");
-2. jitters both sides symmetrically so rare interleavings surface;
-3. lowers both modules to LLVM IR and JIT-compiles several in-memory variants;
-4. runs each variant under multiple OpenMP team sizes and codegen
-   configurations;
-5. compares the observed outcome distributions with a Poisson-based oracle and
-   classifies each run `OK`, `WARN`, or `FAIL`.
+1. parses and clones the module, applying one or more seeded,
+   semantics-preserving transformations to the clone;
+2. inserts symmetric jitter into both source and transformed MLIR so rare
+   interleavings surface;
+3. lowers both all modules to LLVM IR;
+4. agitates each cloned LLVM module for finding rare interleavings;
+5. executes every variant under every team size, plus a single-thread
+   determinism probe;
+6. compares outcome set and classifies
+   each run `OK`, `WARN`, or `FAIL`.
 
 ```mermaid
 flowchart LR
     A[MLIR module] --> B[Clone]
-    B --> C[MetamorphicPass]
-    B --> D[Jitter both sides]
-    C --> E[Lower to LLVM IR]
-    D --> E
-    E --> F[JIT-compile variants]
-    F --> G[Agitation sweep]
-    G --> H[Outcome sets]
-    H --> I[Oracle comparison]
-    I --> J{Relation holds?}
-    J -->|rare state| K[Replay round]
-    J -->|no| L[OK / WARN / FAIL]
+    B --> C[Apply metamorphic transforms to clone]
+    A --> D[Jitter both sides symmetrically]
+    C --> D
+    D --> E[Lower both to LLVM IR]
+    E --> F[Agitation]
+    F --> G[JIT-compile variants]
+    G --> H[Execute variants]
+    H --> I[Collect outcome sets]
+    I --> J[Oracle comparison]
+    J --> K{Relation holds?}
+    K -->|rare state| L[Replay round]
+    L --> J
+    K -->|final| M[OK / WARN / FAIL]
 ```
+
+## Context
+
+Developed during an MLSystems research internship, this project investigates a
+metamorphic-testing approach for concurrency and memory models. Conventional
+testing assumes single-thread execution and falls short on reproducibility because of nondeterminism and varying memory models across hardware. Additionally, the oracle problem continues to haunt software testing generally, and even moreso for nondeterministic, multi-output testing.
+
+By using a metamorphic-testing approach, we can solve these issues. Naturally, metamorphic transformations sidestep the oracle problem, while specifying transformations that are safe for concurrent programs and memory model of the user's device. Unlike other MLIR testing tools, this allows MLIR-MRacle to test OpenMP concurrent programs in a behaviour-preserving way with respect to the notion of concurrency and the user's hardware memory model.
 
 ## Features
 
@@ -46,13 +56,28 @@ flowchart LR
   rare outcomes.
 - Agitation sweep across JIT optimisation levels, basic-block layouts, and
   OpenMP team sizes.
-- ThreadSanitizer support: the tool and JIT'd code run under TSan, and the
-  runner scans stderr for sanitizer reports.
+- ThreadSanitizer support: the tool builds with TSan by default, the runner
+  scans stderr for sanitizer reports, and the legacy pipeline can instrument
+  JIT'd code with TSan via `--tsan`.
 - Persistent disk cache keyed by module hash, so repeated campaigns skip
   lowering and translation.
 - Per-run artifacts (`source.mlir`, `transformed.mlir`, `.ll`, `.bc`,
   `run_info.json`) published as a campaign completes.
 - Python runner and a litmus-style seed corpus.
+
+## Agitation sweep
+
+Each LLVM module is compiled into `binaryCount` (default 5) in-memory JIT
+variants and run under `configCount` (default 5) OpenMP team-size configs.
+
+- **Codegen axis** — each variant clones the module and shuffles non-entry
+  basic blocks; CodeGen opt levels use all of `{0,1,2,3}` when
+  `binaryCount >= 4`. On ELF, per-BB sections preserve the shuffled layout in
+  machine code.
+- **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
+  replacement.
+- **Replay rounds** — rare states re-run with fresh team-size mixes, without
+  recompiling.
 
 ## Repository layout
 
@@ -120,7 +145,7 @@ The binary prints the campaign directory on stdout.
 | `--reps=N` | source-side repetitions / retest budget |
 | `--transform=NAME[,NAME...]` | restrict the transform set |
 | `--apply=N` | max transform applications per function |
-| `--tsan=PERCENT` | share of runs instrumented with TSan |
+| `--tsan=PERCENT` | legacy pipeline only: percent of runs whose JIT'd binaries are TSan-instrumented |
 | `--multi=FOLDER` | pick a random `.mlir` file from a folder per run |
 | `--campaign-dir=PATH` | output location |
 | `--threshold=PCT` | novelty threshold, 0–100 |
@@ -167,11 +192,12 @@ value disables caching).
 Each transform declares the outcome-set relation it preserves; a run compares
 in the direction given by the composition of the transforms actually applied.
 
+### Generic concurrency transforms
+
 | Transform | Effect | Relation |
 | --- | --- | --- |
 | `insert-fence` | insert `omp.flush` inside a thread region | subset |
 | `remove-fence` | remove a random `omp.flush` | superset |
-| `insert-fence-between-mem-ops` | flush between adjacent atomic mem ops | subset |
 | `insert-flush-around-seq-cst` | flush around a seq_cst atomic op | equality |
 | `insert-atomic-cas` | no-op CAS on a fresh thread-local location | equality |
 | `insert-atomic-write` | atomic write of 0 to a thread-local dummy | equality |
@@ -189,18 +215,31 @@ in the direction given by the composition of the transforms actually applied.
 | `relax-operation` | weaken atomic memory order one stage | superset |
 | `restrict-operation` | strengthen atomic memory order one stage | subset |
 | `unroll-single-thread` | unroll a single-section `omp.parallel` | equality |
-| `commute-relaxed-read-write` | swap adjacent relaxed read/write | equality |
-| `commute-relaxed-write-write` | swap adjacent relaxed writes | equality |
+
+### ARMv8
+
+The superbuild enables `X86` and `AArch64` backends; the JIT links the host
+backend, and the rest of the pipeline is target-agnostic. Three transforms are
+marked `ARMv8 Safe` in `MetamorphicPass.cpp`:
+
+- `insert-fence-between-mem-ops` — redundant on memory models stronger than
+  ARMv8
+- `commute-relaxed-read-write` — not possible on stronger memory models
+- `commute-relaxed-write-write` — as above
+
+They are not currently gated by host architecture; the label records the
+memory-model reasoning behind them.
 
 ## How results are judged
 
 - A single-thread probe of both sides must produce the same deterministic
   outcome, or the run fails.
-- Outcome sets are compared under the run's relation. A state present on one
-  side only, or a rate shift on a shared state, is tested against a Poisson
-  model of the source-side counts (`p < 1e-6` flags a deviation).
-- Rare novel states are not immediately judged: a replay round merges
-  additional data before the verdict is finalised.
+- Outcome sets are compared under the run's relation (equality, subset,
+  superset). A state present on one side only, or a rate shift on a shared
+  state, is tested against a Poisson model of the source-side counts
+  (`p < 1e-6` flags a deviation).
+- Rare novel states are not immediately judged; replay rounds merge more data
+  before the final verdict.
 - Verdicts are `OK`, `WARN` (statistical deviation below the fail bar), or
   `FAIL` (hard behavioural change).
 
@@ -209,7 +248,7 @@ in the direction given by the composition of the transforms actually applied.
 A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
 
 - `source.mlir`, `transformed.mlir`, `lowered.mlir`
-- `source.ll`, `transformed.ll`, `module.bc`
+- `source.ll`, `transformed.ll`
 - `run_info.json` — transform applications, per-thread/outcome-set breakdown,
   verdict
 
@@ -229,9 +268,11 @@ configuration success.
 
 ## Troubleshooting
 
-- **TSan at runtime**: the tool must be built with `-fsanitize=thread` so the
-  JIT'd code can resolve the TSan runtime; the default `MLIR_MRACLE_SANITIZERS=thread`
-  build does this.
+- **TSan at runtime**: the tool must be built with TSan so JIT'd TSan
+  instrumentation can resolve the runtime; the default
+  `MLIR_MRACLE_SANITIZERS=thread` build does this. The default `--new-oracle`
+  pipeline does not instrument JIT'd code; use `--legacy --tsan=100` for
+  TSan-instrumented runs.
 - **ASan + TSan**: never combine in one build; set `MLIR_MRACLE_SANITIZERS=""`
   to disable sanitizers.
 - **Apple Silicon OpenMP**: Homebrew `libomp` is auto-detected; ensure it is
