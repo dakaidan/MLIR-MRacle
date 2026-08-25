@@ -1,6 +1,12 @@
 .git
+.venv
 build
 cmake-build-*
+llvm-project
+cache
+results
+logs
+emitted
 fuzzing/artifacts
 fuzzing/corpus/generated
 fuzzing/findings

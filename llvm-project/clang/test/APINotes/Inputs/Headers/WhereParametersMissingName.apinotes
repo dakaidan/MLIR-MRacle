@@ -1,7 +1,0 @@
----
-Name: WhereParametersMissingName
-Functions:
-- Where:
-    Parameters:
-      - int
-  SwiftName: makeWidget(_:)

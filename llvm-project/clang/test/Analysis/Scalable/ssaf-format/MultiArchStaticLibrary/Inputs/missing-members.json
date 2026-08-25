@@ -1,7 +1,0 @@
-{
-  "namespace": {
-    "kind": "MultiArchStaticLibrary",
-    "name": "libfoo"
-  },
-  "type": "MultiArchStaticLibrary"
-}

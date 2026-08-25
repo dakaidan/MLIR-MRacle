@@ -1,0 +1,4 @@
+-f https://llvm.github.io/eudsl
+mlir-wheel==20260824+904188e38
+cmake>=3.24
+ninja

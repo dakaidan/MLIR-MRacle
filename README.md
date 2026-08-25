@@ -14,12 +14,10 @@ Given a concurrent MLIR program, the harness:
    semantics-preserving transformations to the clone;
 2. inserts symmetric jitter into both source and transformed MLIR so rare
    interleavings surface;
-3. lowers both all modules to LLVM IR;
+3. lowers all modules to LLVM IR;
 4. agitates each cloned LLVM module for finding rare interleavings;
-5. executes every variant under every team size, plus a single-thread
-   determinism probe;
-6. compares outcome set and classifies
-   each run `OK`, `WARN`, or `FAIL`.
+5. executes every variant + a single-thread determinism run;
+6. compares outcome set and returns results.
 
 ```mermaid
 flowchart LR
@@ -65,60 +63,58 @@ By using a metamorphic-testing approach, we can solve these issues. Naturally, m
   `run_info.json`) published as a campaign completes.
 - Python runner and a litmus-style seed corpus.
 
-## Agitation sweep
-
-Each LLVM module is compiled into `binaryCount` (default 5) in-memory JIT
-variants and run under `configCount` (default 5) OpenMP team-size configs.
-
-- **Codegen axis** — each variant clones the module and shuffles non-entry
-  basic blocks; CodeGen opt levels use all of `{0,1,2,3}` when
-  `binaryCount >= 4`. On ELF, per-BB sections preserve the shuffled layout in
-  machine code.
-- **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
-  replacement.
-- **Replay rounds** — rare states re-run with fresh team-size mixes, without
-  recompiling.
-
 ## Repository layout
 
-- `mlir-mracle/` — the CMake library (context, lowering, JIT, agitation,
-  oracle, io, core) and the `mlir_mracle_opt` driver under `src/app`.
-- `fuzzing/` — `fuzz_mracle.py` runner, `corpus/seeds/` litmus-style inputs,
-  and analysis scripts.
-- `llvm-project/` — vendored LLVM/MLIR, built in-tree by the superbuild.
-- `conquer-opt/` — vendored CONQuER TOSA quantisation compiler (optional,
-  built when `BUILD_CONQUER_OPT=ON`).
-- `Dockerfile` — containerised build.
+```text
+mlir-mracle/
+└── src/
+    ├── app/              # mlir_mracle_opt CLI driver
+    └── lib/
+        ├── agitation/    # agitates compiled variants across codegen and runtime parameters
+        ├── backend/
+        │   ├── jit/      # JIT-compiles LLVM modules for execution
+        │   └── lowering/ # lowers MLIR to LLVM IR
+        ├── context/      # shared data structures and outcome-set types
+        ├── core/         # pipeline orchestration and configuration
+        ├── execution/    # runs compiled binaries and collects observed outcomes
+        ├── io/           # serializes results and dumps IR artifacts
+        ├── oracle/       # compares outcome sets and derives verdicts
+        └── passes/       # metamorphic transformation passes
+fuzzing/
+├── fuzz_mracle.py        # campaign runner
+└── corpus/
+    └── seeds/            # litmus-style MLIR seed programs
+```
 
 ## Prerequisites
 
-- Docker, or natively: CMake >= 3.20, Ninja, a C++23 compiler, and OpenMP
-  (Homebrew `libomp` on Apple Silicon is auto-detected).
-- Python 3 for the fuzzer runner.
+- Docker, or natively: `uv` (provides Python 3.12, CMake, and Ninja), a C++23
+  compiler, and OpenMP (Homebrew `libomp` on Apple Silicon is auto-detected).
+- LLVM/MLIR come from the `mlir-wheel` package pinned in `requirements.txt`
+  (the latest published snapshot on the `llvm.github.io/eudsl` index); no
+  vendored LLVM build is needed.
 
 ## Getting started
 
 ### Docker
 
 ```bash
-git clone --recurse-submodules https://github.com/dakaidan/MLIR-MRacle.git
+git clone https://github.com/dakaidan/MLIR-MRacle.git
 docker build -t mlir-metamorphic-testing .
 docker run -it --rm mlir-metamorphic-testing /bin/bash
 ```
 
-> [!NOTE]
-> The Dockerfile's default entrypoint runs `./fuzzing/smoke-test.sh`, which is
-> not yet present in the tree. Start the container interactively until that
-> script lands.
-
-The initial build is large because it compiles the pinned LLVM/MLIR stack;
-Docker caching makes subsequent source changes much cheaper.
-
 ### Native build
 
 ```bash
-cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target mlir_mracle_opt -j
+uv python install 3.12
+uv venv --python 3.12
+uv pip install -r requirements.txt
+
+.venv/bin/cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$(.venv/bin/python -m mlir_wheel --root-dir)
+
+.venv/bin/cmake --build build --target mlir_mracle_opt -j
 ```
 
 Build knobs:
@@ -128,7 +124,6 @@ Build knobs:
   combined in one build.
 - `MLIR_MRACLE_OPT_LEVEL` — optimisation level for the tool itself (default
   `2`).
-- `BUILD_CONQUER_OPT` — build the vendored ConQUER compiler (default `OFF`).
 
 ## Usage
 
@@ -160,28 +155,29 @@ Examples:
 
 ```bash
 # default new-oracle campaign on one file
-mlir_mracle_opt --iter=1000 --reps=100 fuzzing/corpus/seeds/iriw.mlir
+path/to/mlir_mracle_opt --iter=1000 --reps=100 fuzzing/corpus/seeds/iriw.mlir
+
+# transform randomly picked files from a corpus folder
+path/to/mlir_mracle_opt --iter=1000 --multi fuzzing/corpus/seeds
 
 # restrict to fence-insertion transforms, fixed seed
-mlir_mracle_opt --seed=7 --transform=insert-fence,remove-fence test.mlir
-
-# emit 50 transformed variants without executing
-mlir_mracle_opt --emit-mlir --reps=50 --transform=insert-jitter test.mlir
+path/to/mlir_mracle_opt --seed=7 --transform=insert-fence,remove-fence test.mlir
 
 # straight execution, no oracle
-mlir_mracle_opt --run test.mlir
+path/to/mlir_mracle_opt --run test.mlir
 ```
 
 ### Fuzzer runner
 
 ```bash
-python3 fuzzing/fuzz_mracle.py [options] <file-or-directory>
+.venv/bin/python fuzzing/fuzz_mracle.py [options] <file-or-directory>
 ```
 
 The runner builds a thread-sanitized `mlir_mracle_opt` on first use (caching
 executables by source fingerprint), runs a campaign, and scans stderr for
 TSan/ASan/UBSan reports. On sanitizer hits it writes `sanitizer.log` and
-classifies the campaign `ERROR`. See `python3 fuzzing/fuzz_mracle.py --help`.
+classifies the campaign `ERROR`. See
+`.venv/bin/python fuzzing/fuzz_mracle.py --help`.
 
 Environment: `MLIR_MRACLE_OPT` overrides the binary path, `MLIR_MRACLE_BUILD_DIR`
 the build directory, and `MLIR_MRACLE_CACHE_DIR` the artifact cache (an empty
@@ -193,6 +189,8 @@ Each transform declares the outcome-set relation it preserves; a run compares
 in the direction given by the composition of the transforms actually applied.
 
 ### Generic concurrency transforms
+
+Safe for any memory model.
 
 | Transform | Effect | Relation |
 | --- | --- | --- |
@@ -218,17 +216,26 @@ in the direction given by the composition of the transforms actually applied.
 
 ### ARMv8
 
-The superbuild enables `X86` and `AArch64` backends; the JIT links the host
-backend, and the rest of the pipeline is target-agnostic. Three transforms are
-marked `ARMv8 Safe` in `MetamorphicPass.cpp`:
+Three transforms are ARMv8-specific with behaviour changing on either stronger or weaker memory models. They are marked `ARMv8 Safe` in `MetamorphicPass.cpp`:
 
 - `insert-fence-between-mem-ops` — redundant on memory models stronger than
   ARMv8
 - `commute-relaxed-read-write` — not possible on stronger memory models
 - `commute-relaxed-write-write` — as above
 
-They are not currently gated by host architecture; the label records the
-memory-model reasoning behind them.
+## Agitation sweep
+
+Each LLVM module is compiled into `binaryCount` (default 5) in-memory JIT
+variants and run under `configCount` (default 5) OpenMP team-size configs.
+
+- **Codegen axis** — each variant clones the module and shuffles non-entry
+  basic blocks; CodeGen opt levels use all of `{0,1,2,3}` when
+  `binaryCount >= 4`. On ELF, per-BB sections preserve the shuffled layout in
+  machine code.
+- **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
+  replacement.
+- **Replay rounds** — rare states re-run with fresh team-size mixes, without
+  recompiling.
 
 ## How results are judged
 

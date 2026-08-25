@@ -1,8 +1,0 @@
-{
-  "type": "StaticLibrary",
-  "namespace": {
-    "kind": "StaticLibrary",
-    "name": "libfoo"
-  },
-  "members": []
-}

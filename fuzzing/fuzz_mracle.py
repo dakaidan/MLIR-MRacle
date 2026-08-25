@@ -26,6 +26,17 @@ SANITIZER_PATTERNS = [
 ]
 
 
+def mlir_wheel_root():
+    try:
+        return subprocess.check_output(
+            [sys.executable, "-m", "mlir_wheel", "--root-dir"],
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        sys.exit("mlir_wheel not installed; create the uv venv and run "
+                 "`uv pip install -r requirements.txt` first")
+
+
 def build_dir_for(sanitizers):
     env = os.environ.get("MLIR_MRACLE_BUILD_DIR")
     if env:
@@ -77,6 +88,14 @@ def source_fingerprint():
             hasher.update(path.read_bytes())
         except OSError:
             pass
+    for rel in ("CMakeLists.txt", "requirements.txt"):
+        path = PROJECT_ROOT / rel
+        if path.is_file():
+            hasher.update(rel.encode())
+            try:
+                hasher.update(path.read_bytes())
+            except OSError:
+                pass
     return hasher.hexdigest()[:16]
 
 
@@ -101,6 +120,7 @@ def build_binary(opt_level=2, sanitizers="thread"):
         return cached
     build_dir = build_dir_for(sanitizers)
     config = [cmake, "-S", str(PROJECT_ROOT), "-B", str(build_dir),
+              f"-DCMAKE_PREFIX_PATH={mlir_wheel_root()}",
               f"-DMLIR_MRACLE_OPT_LEVEL={opt_level}",
               f"-DMLIR_MRACLE_SANITIZERS={sanitizers}"]
     if not (build_dir / "CMakeCache.txt").exists():

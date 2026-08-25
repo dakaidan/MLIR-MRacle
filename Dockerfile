@@ -11,12 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     clang \
-    cmake \
+    curl \
     git \
     lld \
-    ninja-build \
-    python3 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
 
 RUN if [ "$ENABLE_FUZZING" = "ON" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
@@ -40,31 +41,26 @@ RUN if [ "$ENABLE_VULKAN" = "ON" ]; then \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 
-ARG BUILD_CONQUER_OPT=OFF
-
 WORKDIR /workspace
+
+COPY requirements.txt .
+RUN uv python install 3.12 \
+ && uv venv --python 3.12 \
+ && uv pip install -r requirements.txt
+
 COPY . .
 
-RUN cmake -G Ninja \
+RUN .venv/bin/cmake -G Ninja \
       -S . \
       -B build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
-      -DCONQUER_ENABLE_IREE=ON \
-      -DCONQUER_BUILD_TESTS=OFF \
-      -DCONQUER_BACKEND_CUDA=${ENABLE_CUDA} \
-      -DCONQUER_BACKEND_ROCM=${ENABLE_ROCM} \
-      -DCONQUER_BACKEND_VULKAN=${ENABLE_VULKAN}
+      -DCMAKE_PREFIX_PATH=$(.venv/bin/python -m mlir_wheel --root-dir)
 
-RUN if [ "$BUILD_CONQUER_OPT" = "ON" ]; then \
-      cmake --build build --target conquer-opt -j "$(nproc)"; \
-    else \
-      cmake --build build --target mlir_mracle-smoke -j "$(nproc)"; \
-    fi
+RUN .venv/bin/cmake --build build --target mlir_mracle_opt -j "$(nproc)"
 
-ENV PATH="/workspace/build:/workspace/build/bin:${PATH}" \
-    BUILD_CONQUER_OPT=${BUILD_CONQUER_OPT} \
+ENV PATH="/workspace/.venv/bin:/workspace/build:/workspace/build/bin:${PATH}" \
     ENABLE_FUZZING=${ENABLE_FUZZING}
 
 CMD ["./fuzzing/smoke-test.sh"]

@@ -868,7 +868,8 @@ private:
 
         omp::AtomicCompareOp cas = omp::AtomicCompareOp::create(
             rewriter, loc, memref, /*weak=*/false, /*hint=*/0,
-            /*memory_order=*/omp::ClauseMemoryOrderKindAttr{});
+            /*memory_order=*/omp::ClauseMemoryOrderKindAttr{},
+            /*fail_memory_order=*/omp::ClauseMemoryOrderKindAttr{});
         Block *body = rewriter.createBlock(&cas.getRegion(), {},
                                            {rewriter.getI32Type()}, {loc});
         rewriter.setInsertionPointToStart(body);
