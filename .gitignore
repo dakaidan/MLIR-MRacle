@@ -79,7 +79,7 @@ llvm-project/**/build/
 llvm-project/install/
 .vscode/
 results/
-corpus/
+/corpus/
 cache/
 emitted/
 .DS_Store
