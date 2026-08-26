@@ -27,32 +27,29 @@ struct PipelineOptions {
     int thresholdPct = 5; // fail/warn classifier; deviations are only flagged when Poisson-significant
 };
 
-// schema version embedded in persistent baseline-cache keys and prefixes
-inline constexpr int kResultSchemaVersion = 8;
-
 struct PipelineResult {
     std::vector<RunInfo> runs;
     std::string campaignDir;
 };
 
-PipelineResult runPipeline(const PipelineOptions &opts);
-PipelineResult runEmitPipeline(const PipelineOptions &opts);
-
 // default mode: compile both modules as an in-memory binary set (no
 // bitcode/cache), run the agitation sweep, judge the aggregate outcome sets
-// with newOracleCompare, replay rare states up to maxSourceReps, then report
+// with oracleCompare, replay rare states up to maxSourceReps, then report
 // the final post-replay verdict.
-PipelineResult runNewOraclePipeline(const PipelineOptions &opts);
+PipelineResult runPipeline(const PipelineOptions &opts);
 
-struct ExecutionPipelineResult {
-    std::vector<ExecutionRunResult> runs;
-    std::string campaignDir;
-};
-
-ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts);
+// single run of the default pipeline: applies the requested transforms, adds
+// symmetric jitter delay chains to both modules, lowers and translates both
+// modules directly (no persistent cache, no source memo), runs the agitation
+// sweep through the harness, then replays rare states in rounds of --reruns
+// until they resolve or the total source runs across all binaries reach the
+// --max-runs cap. The verdict is the final post-replay comparison, judged on
+// merged data.
+RunInfo runSingle(const std::string &inputFile, int seed, int runIdx,
+                  const PipelineOptions &opts);
 
 // releases process-lifetime JIT state (compiled source binaries) while the
 // runtime is still healthy; must be called before exit
-void shutdownCore();
+void shutdownPipeline();
 
 } // namespace mlir_mracle

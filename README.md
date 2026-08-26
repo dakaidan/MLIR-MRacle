@@ -75,10 +75,11 @@ mlir-mracle/
         │   ├── jit/      # JIT-compiles LLVM modules for execution
         │   └── lowering/ # lowers MLIR to LLVM IR
         ├── context/      # shared data structures and outcome-set types
-        ├── core/         # pipeline orchestration and configuration
         ├── execution/    # runs compiled binaries and collects observed outcomes
         ├── io/           # serializes results and dumps IR artifacts
+        ├── legacy/       # legacy thread-group oracle pipeline (--legacy)
         ├── oracle/       # compares outcome sets and derives verdicts
+        ├── pipeline/     # pipeline orchestration, emit and execution modes
         └── passes/       # metamorphic transformation passes
 fuzzing/
 ├── fuzz_mracle.py        # campaign runner
@@ -148,13 +149,13 @@ The binary prints the campaign directory on stdout.
 | `--max-runs=N` | hard cap for source runs per baseline |
 | `--run` | execution mode: no oracle comparison, `.ll` artifacts only |
 | `--legacy` | legacy (thread-group) oracle pipeline |
-| `--new-oracle` | default new-oracle pipeline (explicit selector) |
+| `--new-oracle` | default agitation-sweep pipeline (explicit selector) |
 | `--emit-mlir` | emit transformed modules only; requires `--transform` |
 
 Examples:
 
 ```bash
-# default new-oracle campaign on one file
+# default agitation-sweep campaign on one file
 path/to/mlir_mracle_opt --iter=1000 --reps=100 fuzzing/corpus/seeds/iriw.mlir
 
 # transform randomly picked files from a corpus folder
@@ -266,7 +267,7 @@ A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
 ## Testing
 
 ```bash
-cmake --build build --target mlir_mracle_oracle_test mlir_mracle_new_oracle_test -j
+cmake --build build --target mlir_mracle_oracle_test mlir_mracle_legacy_oracle_test -j
 ctest --test-dir build --output-on-failure
 ```
 
@@ -277,7 +278,7 @@ configuration success.
 
 - **TSan at runtime**: the tool must be built with TSan so JIT'd TSan
   instrumentation can resolve the runtime; the default
-  `MLIR_MRACLE_SANITIZERS=thread` build does this. The default `--new-oracle`
+  `MLIR_MRACLE_SANITIZERS=thread` build does this. The default
   pipeline does not instrument JIT'd code; use `--legacy --tsan=100` for
   TSan-instrumented runs.
 - **ASan + TSan**: never combine in one build; set `MLIR_MRACLE_SANITIZERS=""`

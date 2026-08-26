@@ -243,21 +243,3 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
     };
 }
 
-// actual execution of the JIT'd code, with error handling
-int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
-                             mlir_mracle::RunInfo *runInfo,
-                             int jitOptLevel) {
-    std::string error;
-    auto fn = compileLLVMModuleToFunction(std::move(llvmModule), &error,
-                                          false, jitOptLevel);
-    if (!fn) {
-        if (runInfo)
-            runInfo->error = error;
-        return 1;
-    }
-    if (runInfo)
-        runInfo->error.clear();
-    auto results = fn();
-    return results.empty() ? 0 : static_cast<int>(results[0]);
-}
-

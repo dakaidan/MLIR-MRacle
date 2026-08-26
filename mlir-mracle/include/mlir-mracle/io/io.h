@@ -31,10 +31,8 @@ struct JsonValue {
     std::vector<std::pair<std::string, JsonValue>> object;
 };
 
-JsonValue jsonNull();
 JsonValue jsonBool(bool v);
 JsonValue jsonInt(int64_t v);
-JsonValue jsonDouble(double v);
 JsonValue jsonString(std::string v);
 JsonValue jsonArray();
 void jsonPush(JsonValue &arr, JsonValue v);
@@ -55,11 +53,6 @@ bool observedOutcomeSetFromJson(const llvm::json::Object &o,
 // renders an outcome-set comparison result as a JSON object
 JsonValue outcomeSetResultToJson(const OutcomeSetResult &result);
 
-// parses an outcome-set comparison result from a JSON object; returns false
-// on malformed input
-bool outcomeSetResultFromJson(const llvm::json::Object &o,
-                              OutcomeSetResult &result);
-
 // "OK", "WARN", or "ERROR" for a run
 std::string runStatusString(const RunInfo &info);
 
@@ -69,8 +62,8 @@ JsonValue runInfoToJson(const RunInfo &info);
 // renders a run with thread results for the run_info.json artifact
 JsonValue runInfoToStatusJson(const RunInfo &info);
 
-// renders a new-oracle run with union outcome sets and a concise per-binary
-// breakdown for the run_info.json artifact
+// renders a default-pipeline run with union outcome sets and a concise
+// per-binary breakdown for the run_info.json artifact
 JsonValue runInfoToUnionJson(const RunInfo &info);
 
 // renders an execution-mode run with grouped thread results for result.json

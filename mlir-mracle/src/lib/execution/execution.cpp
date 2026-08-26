@@ -1,8 +1,8 @@
 #include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/agitation/agitation.h"
-#include "mlir-mracle/oracle/oracle.h"
 
 #include <cstdlib>
+#include <map>
 #include <utility>
 
 #include <omp.h>
@@ -48,6 +48,73 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
 }
 
 } // namespace
+
+ObservedOutcomeSet collectOutcomeSet(
+    const std::function<std::vector<int64_t>()> &fn, int numRuns,
+    int numThreads) {
+    // a single caller thread owns the whole sweep; numThreads only sizes the
+    // OpenMP team the program runs with, so the harness itself cannot race
+    // on the JIT'd module's globals or the OpenMP runtime
+    omp_set_num_threads(numThreads);
+    ObservedOutcomeSet set;
+    std::map<JointOutcome, int64_t> freq;
+    for (int i = 0; i < numRuns; ++i) {
+        auto res = fn();
+        if (set.arityConsistent) {
+            if (set.arity == 0)
+                set.arity = res.size();
+            else if (res.size() != set.arity)
+                set.arityConsistent = false;
+        }
+        ++freq[std::move(res)];
+    }
+    set.outcomes.reserve(freq.size());
+    set.counts.reserve(freq.size());
+    for (const auto &[outcome, count] : freq) {
+        set.outcomes.push_back(outcome);
+        set.counts.push_back(count);
+    }
+    set.totalRuns = numRuns;
+    return set;
+}
+
+ObservedOutcomeSet mergeOutcomeSets(const ObservedOutcomeSet &a,
+                                    const ObservedOutcomeSet &b) {
+    ObservedOutcomeSet out;
+    out.totalRuns = a.totalRuns + b.totalRuns;
+    out.outcomes.reserve(a.outcomes.size() + b.outcomes.size());
+    out.counts.reserve(a.counts.size() + b.counts.size());
+
+    size_t i = 0, j = 0;
+    while (i < a.outcomes.size() || j < b.outcomes.size()) {
+        if (j >= b.outcomes.size() ||
+            (i < a.outcomes.size() && a.outcomes[i] < b.outcomes[j])) {
+            out.outcomes.push_back(a.outcomes[i]);
+            out.counts.push_back(i < a.counts.size() ? a.counts[i] : 0);
+            ++i;
+        } else if (i >= a.outcomes.size() ||
+                   b.outcomes[j] < a.outcomes[i]) {
+            out.outcomes.push_back(b.outcomes[j]);
+            out.counts.push_back(j < b.counts.size() ? b.counts[j] : 0);
+            ++j;
+        } else {
+            out.outcomes.push_back(a.outcomes[i]);
+            out.counts.push_back((i < a.counts.size() ? a.counts[i] : 0) +
+                                 (j < b.counts.size() ? b.counts[j] : 0));
+            ++i;
+            ++j;
+        }
+    }
+
+    out.arityConsistent = true;
+    for (const auto &jo : out.outcomes) {
+        if (out.arity == 0)
+            out.arity = jo.size();
+        else if (jo.size() != out.arity)
+            out.arityConsistent = false;
+    }
+    return out;
+}
 
 ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
                                     const llvm::Module &transformedModule,

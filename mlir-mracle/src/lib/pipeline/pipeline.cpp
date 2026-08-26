@@ -1,0 +1,193 @@
+#include "mlir-mracle/pipeline/pipeline.h"
+
+#include "mlir-mracle/execution/execution.h"
+#include "mlir-mracle/io/artifacts.h"
+#include "mlir-mracle/io/io.h"
+#include "mlir-mracle/oracle/oracle.h"
+#include "mlir-mracle/pipeline/common/pipeline_common.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace mlir_mracle {
+
+// default pipeline single run: applies the requested transforms, adds
+// symmetric jitter delay chains to both modules, lowers and translates both
+// modules directly (no persistent cache, no source memo), runs the agitation
+// sweep through the harness, then replays rare states in rounds of --reruns
+// until they resolve or the total source runs across all binaries reach the
+// --max-runs cap. The verdict is the final post-replay comparison, judged on
+// merged data.
+RunInfo runSingle(const std::string &inputFile, int seed,
+                  int runIdx, const PipelineOptions &opts) {
+    MLIRSetup setup(seed, runIdx, opts.transform, opts.maxApply);
+
+    mlir::OwningOpRef<mlir::ModuleOp> originalModule;
+    mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
+    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
+        return setup.runInfo;
+
+    // jitter widens the race windows on both sides with the same seed, so
+    // rare states surface more often without biasing the comparison
+    if (!applyJitter(setup.mlirContext, *originalModule, seed,
+                     setup.runInfo.error) ||
+        !applyJitter(setup.mlirContext, *moduleToTransform, seed,
+                     setup.runInfo.error))
+        return setup.runInfo;
+
+    // snapshot both jittered modules before lowering overwrites them
+    setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
+    setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
+
+    std::unique_ptr<llvm::Module> sourceLLVM;
+    if (!lowerAndTranslate(*originalModule, setup.mlirContext,
+                           setup.llvmContext, "source", nullptr,
+                           &setup.runInfo.sourceJitLLVM, sourceLLVM,
+                           setup.runInfo.error))
+        return setup.runInfo;
+
+    std::unique_ptr<llvm::Module> transformedLLVM;
+    if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
+                           setup.llvmContext, "transformed",
+                           &setup.runInfo.loweredMLIR,
+                           &setup.runInfo.jitLLVM, transformedLLVM,
+                           setup.runInfo.error))
+        return setup.runInfo;
+
+    ExecutionOptions execOpts;
+    execOpts.seed = static_cast<uint32_t>(seed);
+    execOpts.runsPerBinary = opts.reps;
+    execOpts.singleThreadRuns = kDeterminismReps;
+    execOpts.compile.enableTsan = false;
+    execOpts.compile.shuffleSeed = static_cast<uint32_t>(seed);
+    ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
+                                               execOpts);
+    if (!exec.error.empty()) {
+        setup.runInfo.error = exec.error;
+        return setup.runInfo;
+    }
+
+    OracleOptions oracleOpts;
+    oracleOpts.relation = setup.runInfo.relation;
+    oracleOpts.thresholdPct = opts.thresholdPct;
+
+    // --max-runs caps the total source executions across all agitation
+    // binaries; the replay budget is what remains of the cap after the
+    // initial sweep. rerunAllBinaries adds `extra` runs per binary, so each
+    // replay round spends binaryCount * extra source executions. An ok
+    // verdict stops immediately; a warn or a pending rare-state rerun keeps
+    // replaying (re-checking on merged data) until it resolves to ok/fail or
+    // the cap is reached; a fail never replays.
+    int64_t binaryCount =
+        std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
+    OracleResult verdict = oracleCompare(exec, oracleOpts);
+    int replayRound = 0;
+    while ((verdict.needsRerun || verdict.compare.warn) &&
+           exec.sourceTotal.totalRuns < opts.maxSourceReps) {
+        int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
+        int extra = static_cast<int>(std::min<int64_t>(
+            opts.retestReps, budget / binaryCount));
+        if (extra <= 0)
+            break;
+        // each round re-agitates with its own seed derived directly from the
+        // run seed (round 1 -> seed+1, round 2 -> seed+2, ...), so the whole
+        // replay sequence is reproducible from --seed alone and every round
+        // draws a fresh team-size mix
+        rerunAllBinaries(exec, extra,
+                         static_cast<uint32_t>(seed) +
+                             static_cast<uint32_t>(++replayRound),
+                         execOpts.configCount);
+        verdict = oracleCompare(exec, oracleOpts);
+    }
+    oracleOpts.postReruns = true;
+    verdict = oracleCompare(exec, oracleOpts);
+
+    // (thread counts, opt levels, code layout), so no single team size
+    // is reported; the run-level union sets carry the verdict data and a
+    // concise per-binary breakdown sits alongside
+    setup.runInfo.sourceRuns = exec.sourceTotal.totalRuns;
+    setup.runInfo.transformedRuns = exec.transformedTotal.totalRuns;
+    setup.runInfo.sourceOutcomes = std::move(exec.sourceTotal.outcomes);
+    setup.runInfo.sourceCounts = std::move(exec.sourceTotal.counts);
+    setup.runInfo.transformedOutcomes =
+        std::move(exec.transformedTotal.outcomes);
+    setup.runInfo.transformedCounts =
+        std::move(exec.transformedTotal.counts);
+
+    int srcCount = static_cast<int>(exec.sourceBinaries.size());
+    for (size_t i = 0; i < exec.binaryResults.size(); ++i) {
+        const auto &br = exec.binaryResults[i];
+        const CompiledBinary *bin =
+            static_cast<int>(i) < srcCount
+                ? &exec.sourceBinaries[i]
+                : &exec.transformedBinaries[i - srcCount];
+        BinaryOutcomeResult bo;
+        bo.side = br.side;
+        bo.compileIndex = bin->compileIndex;
+        bo.jitOptLevel = bin->jitOptLevel;
+        bo.runs = static_cast<int>(br.threadedTotal.totalRuns);
+        bo.outcomes = br.threadedTotal.outcomes;
+        bo.counts = br.threadedTotal.counts;
+        setup.runInfo.binaryOutcomes.push_back(std::move(bo));
+    }
+
+    if (!verdict.compare.ok)
+        setup.runInfo.error = verdict.compare.message;
+    else if (verdict.compare.warn)
+        setup.runInfo.warn = verdict.compare.message;
+    return setup.runInfo;
+}
+
+// core pipeline function for the default agitation-sweep oracle: runs the
+// oracle comparison over transformed vs source modules with rare-state
+// replay. Each run is published to the campaign folder as it completes.
+
+PipelineResult runPipeline(const PipelineOptions &opts) {
+    PipelineResult result;
+    result.runs.reserve(opts.numRuns);
+
+    createCampaignDir(opts);
+    createCampaignStatusDirs(gCampaignDir);
+
+    std::vector<std::string> multiFiles;
+    if (!opts.multiFolder.empty()) {
+        multiFiles = collectMLIRFiles(opts.multiFolder);
+        if (multiFiles.empty()) {
+            RunInfo errInfo;
+            errInfo.error = "no .mlir files in " + opts.multiFolder;
+            errInfo.runNumber = opts.runNumber;
+            saveRunArtifacts(errInfo, "fail", gCampaignDir,
+                             /*unionFormat=*/true);
+            JsonValue errArr = jsonArray();
+            jsonPush(errArr, runInfoToJson(errInfo));
+            writeResultJson(errArr, gCampaignDir);
+            result.runs.push_back(errInfo);
+            result.campaignDir = gCampaignDir;
+            return result;
+        }
+    }
+
+    for (int i = 0; i < opts.numRuns; ++i) {
+        int runIdx = opts.runNumber + i;
+        int runSeed = runSeedFor(opts, runIdx);
+        std::string inputFile =
+            pickInputFile(opts, multiFiles, runIdx, runSeed);
+
+        RunInfo info = runSingle(inputFile, runSeed, runIdx, opts);
+
+        saveRunArtifacts(info, statusDirFor(info), gCampaignDir,
+                         /*unionFormat=*/true);
+        result.runs.push_back(std::move(info));
+    }
+
+    JsonValue arr = jsonArray();
+    for (const auto &run : result.runs)
+        jsonPush(arr, runInfoToJson(run));
+    writeResultJson(arr, gCampaignDir);
+    result.campaignDir = gCampaignDir;
+    return result;
+}
+
+} // namespace mlir_mracle

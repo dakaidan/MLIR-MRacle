@@ -15,6 +15,5 @@ target_include_directories(mlir_mracle_execution PUBLIC
 
 target_link_libraries(mlir_mracle_execution PUBLIC
     mlir_mracle_agitation
-    mlir_mracle_oracle
     OpenMP::OpenMP_CXX
 )

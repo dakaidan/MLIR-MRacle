@@ -65,26 +65,6 @@ void promoteOMPAtomicOperands(mlir::ModuleOp module) {
 
 } // namespace
 
-// mlir::LogicalResult lowerToLLVM(mlir::ModuleOp module, mlir::MLIRContext *ctx) {
-//     // memref must be lowered before OpenMP: omp.atomic.write/omp.flush carry
-//     // memref operands that the OpenMP conversion refuses to handle, and the
-//     // LLVMIR translation needs LLVM pointers for them.
-//     mlir::PassManager pm(ctx);
-//     pm.addPass(mlir::createLowerAffinePass());
-//     pm.addPass(mlir::createSCFToControlFlowPass());
-//     pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-//     if (mlir::failed(pm.run(module)))
-//         return mlir::failure();
-//     promoteOMPAtomicOperands(module);
-//     mlir::PassManager pm2(ctx);
-//     pm2.addPass(mlir::createArithToLLVMConversionPass());
-//     pm2.addPass(mlir::createConvertOpenMPToLLVMPass());
-//     pm2.addPass(mlir::createConvertControlFlowToLLVMPass());
-//     pm2.addPass(mlir::createConvertFuncToLLVMPass());
-//     pm2.addPass(mlir::createReconcileUnrealizedCastsPass());
-//     return pm2.run(module);
-// }
-
 mlir::LogicalResult lowerToLLVM(mlir::ModuleOp module, mlir::MLIRContext *ctx) {
     // Stage 1: Lower high-level dialects to structured loops and memrefs.
     mlir::PassManager pm1(ctx);

@@ -9,15 +9,6 @@
 #include <string>
 #include <vector>
 
-namespace mlir_mracle {
-struct RunInfo;
-}
-
-// Runs the given LLVM module in a JIT and returns the result of its "main" function.
-int executeLLVMModuleWithJIT(std::unique_ptr<llvm::Module> llvmModule,
-                             mlir_mracle::RunInfo *runInfo = nullptr,
-                             int jitOptLevel = -1);
-
 // Compiles the module once and returns a callable that runs its "main".
 // When enableTsan is set, the module is instrumented with ThreadSanitizer,
 // which perturbs memory-access scheduling and surfaces rare outcomes under

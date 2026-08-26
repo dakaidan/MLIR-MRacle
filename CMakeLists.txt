@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(MLIRMetamorphicTestingSuperbuild LANGUAGES C CXX)
 
+enable_testing()
+
 find_package(MLIR CONFIG REQUIRED)
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")

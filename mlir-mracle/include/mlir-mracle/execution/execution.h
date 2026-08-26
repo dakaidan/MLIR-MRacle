@@ -2,15 +2,26 @@
 
 #include "mlir-mracle/agitation/agitation.h"
 #include "mlir-mracle/context/context.h"
-#include "mlir-mracle/oracle/oracle.h"
 
 #include "llvm/IR/Module.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace mlir_mracle {
+
+// Runs fn numRuns times from a single caller thread at the given OpenMP team
+// size and returns the sorted unique joint outcomes observed, along with the
+// number of times each one occurred.
+ObservedOutcomeSet collectOutcomeSet(
+    const std::function<std::vector<int64_t>()> &fn, int numRuns,
+    int numThreads);
+
+// Sorted merge of two observed outcome sets; counts and totalRuns are summed.
+ObservedOutcomeSet mergeOutcomeSets(const ObservedOutcomeSet &a,
+                                    const ObservedOutcomeSet &b);
 
 struct BinaryConfigResult {
     int configIndex = 0;

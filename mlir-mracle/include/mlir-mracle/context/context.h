@@ -66,7 +66,7 @@ struct ThreadGroupResult {
 
 // outcomes observed for a single compiled binary during an agitation sweep;
 // the concise per-binary breakdown appended below the union outcome sets in
-// the new-oracle run_info.json
+// the default run_info.json
 struct BinaryOutcomeResult {
     std::string side;      // "source" | "transformed"
     int compileIndex = 0;  // index within the side's binary set
@@ -86,7 +86,7 @@ struct RunInfo {
     std::vector<ThreadGroupResult> threadResults;
     bool transformApplied = false;
     // union outcome sets aggregated over the whole agitation sweep (thread
-    // counts, opt levels, code layout); filled by the new-oracle pipeline
+    // counts, opt levels, code layout); filled by the default pipeline
     // instead of a fake thread group
     int64_t sourceRuns = 0;
     int64_t transformedRuns = 0;

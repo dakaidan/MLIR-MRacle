@@ -23,11 +23,6 @@ std::string dumpLLVM(llvm::Module &module) {
     return buf;
 }
 
-JsonValue jsonNull() {
-    JsonValue v;
-    return v;
-}
-
 JsonValue jsonBool(bool b) {
     JsonValue v;
     v.kind = JsonValue::Kind::Bool;
@@ -39,13 +34,6 @@ JsonValue jsonInt(int64_t i) {
     JsonValue v;
     v.kind = JsonValue::Kind::Int;
     v.intVal = i;
-    return v;
-}
-
-JsonValue jsonDouble(double d) {
-    JsonValue v;
-    v.kind = JsonValue::Kind::Double;
-    v.doubleVal = d;
     return v;
 }
 
@@ -257,44 +245,6 @@ JsonValue outcomeSetResultToJson(const OutcomeSetResult &result) {
             outcomeListToJson(result.transformed.outcomes,
                               result.transformed.counts));
     return obj;
-}
-
-bool outcomeSetResultFromJson(const llvm::json::Object &o,
-                              OutcomeSetResult &result) {
-    auto parseOutcomes = [](const llvm::json::Array *arr,
-                            std::vector<JointOutcome> &out,
-                            std::vector<int64_t> &counts) {
-        if (!arr)
-            return false;
-        for (const auto &cv : *arr) {
-            int64_t count = 1;
-            const llvm::json::Array *va = nullptr;
-            if (const auto *obj = cv.getAsObject()) {
-                va = obj->getArray("outcome");
-                if (auto c = obj->getInteger("count"))
-                    count = *c;
-            } else {
-                va = cv.getAsArray();
-            }
-            if (!va)
-                return false;
-            JointOutcome jo;
-            for (const auto &ev : *va)
-                if (auto v = ev.getAsInteger())
-                    jo.push_back(static_cast<int64_t>(*v));
-            out.push_back(std::move(jo));
-            counts.push_back(count);
-        }
-        return true;
-    };
-    if (!parseOutcomes(o.getArray("source_outcomes"), result.source.outcomes,
-                       result.source.counts))
-        return false;
-    if (!parseOutcomes(o.getArray("transformed_outcomes"),
-                       result.transformed.outcomes,
-                       result.transformed.counts))
-        return false;
-    return true;
 }
 
 namespace {

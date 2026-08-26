@@ -20,6 +20,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <random>
 #include <string>
@@ -733,47 +734,6 @@ private:
         rewriter.eraseOp(fences[dist(rng)]);
         return true;
     }
-
-//    bool tryInsertThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-//
-//        // Walk to find an existing omp.sections op
-//        SmallVector<omp::SectionsOp> sectionsOps;
-//        op.walk([&](omp::SectionsOp s) {
-//            sectionsOps.push_back(s);
-//        });
-//
-//        if (sectionsOps.empty())
-//            return false;
-//        
-//        std::uniform_int_distribution<size_t> dist(0, sectionsOps.size() - 1);
-//        auto &section = sectionsOps[dist(rng)];
-//
-//        // if no omp.sections op found, return false and do not apply
-//        if (!section)
-//            return false;
-//
-//        Region &region = section.getRegion();
-//        if (region.empty())
-//            return false;
-//
-//        Block &sectionBlock = region.front();
-//        if (sectionBlock.empty() || !sectionBlock.back().hasTrait<OpTrait::IsTerminator>())
-//            return false;
-//
-//        // Insert a new section before the sections terminator.
-//        Operation *terminator = sectionBlock.getTerminator();
-//        rewriter.setInsertionPoint(terminator);
-//
-//        auto newSection = omp::SectionOp::create(rewriter, op.getLoc());
-//
-//        // Create a new block for the new section
-//        Block *body = rewriter.createBlock(&newSection.getRegion());
-//        for (Type ty : sectionBlock.getArgumentTypes())
-//            body->addArgument(ty, op.getLoc());
-//        omp::TerminatorOp::create(rewriter, op.getLoc());
-//
-//        return true;
-//    }
 
     bool tryInsertAtomicWriteInThread(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
@@ -1542,26 +1502,7 @@ private:
         return true;
     }
 
-    bool tryChangeCompareOp(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
-        SmallVector<omp::AtomicCompareOp> candidates;
-        op.getBody().walk([&](omp::AtomicCompareOp cmp) {
-            candidates.push_back(cmp);
-        });
-
-        if (candidates.empty())
-            return false;
-
-        std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
-        omp::AtomicCompareOp targetCmp = candidates[dist(rng)];
-
-        // flip the weak flag
-        targetCmp.setWeak(!targetCmp.getWeak());
-
-        return true;
-    }
-
     // ARMv8 TRANSFORMS BELOW
-
     bool tryInsertFenceInbetweenMemOps(func::FuncOp op, RewriterBase &rewriter, std::mt19937 &rng) {
         // get chains of consecutive atomic writes and reads in threads
         SmallVector<SmallVector<Operation *>> chains =
@@ -1727,9 +1668,3 @@ std::unique_ptr<Pass> createMetamorphicPass(
 
 #define GEN_PASS_REGISTRATION
 #include "MetamorphicPass.inc"
-#include <list>
-#include <set>
-#include <map>
-#include <cmath>
-#include <iterator>
-#include <stack>

@@ -1,4 +1,4 @@
-add_library(mlir_mracle_oracle STATIC oracle.cpp new_oracle.cpp)
+add_library(mlir_mracle_oracle STATIC oracle.cpp)
 add_library(MLIRMRACLE::mlir_mracle_oracle ALIAS mlir_mracle_oracle)
 
 set_property(TARGET mlir_mracle_oracle PROPERTY CXX_STANDARD 23)
@@ -18,23 +18,15 @@ target_link_libraries(mlir_mracle_oracle PUBLIC
     mlir_mracle_context
 )
 
+# The test includes oracle.cpp (see the #include in the test) so the static
+# judges are testable; the library is deliberately not linked (it would
+# duplicate oracleCompare)
 add_executable(mlir_mracle_oracle_test oracle_test.cpp)
 
 set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_STANDARD 23)
 set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_EXTENSIONS OFF)
 
-target_link_libraries(mlir_mracle_oracle_test PRIVATE MLIRMRACLE::mlir_mracle_oracle)
+target_link_libraries(mlir_mracle_oracle_test PRIVATE MLIRMRACLE::mlir_mracle_context)
 
-# includes new_oracle.cpp (see the #include in the test) so the static judges
-# are testable; the library is deliberately not linked (it would duplicate
-# newOracleCompare)
-add_executable(mlir_mracle_new_oracle_test
-    new_oracle_test.cpp
-)
-
-set_property(TARGET mlir_mracle_new_oracle_test PROPERTY CXX_STANDARD 23)
-set_property(TARGET mlir_mracle_new_oracle_test PROPERTY CXX_STANDARD_REQUIRED ON)
-set_property(TARGET mlir_mracle_new_oracle_test PROPERTY CXX_EXTENSIONS OFF)
-
-target_link_libraries(mlir_mracle_new_oracle_test PRIVATE MLIRMRACLE::mlir_mracle_context)
+add_test(NAME oracle_test COMMAND mlir_mracle_oracle_test)

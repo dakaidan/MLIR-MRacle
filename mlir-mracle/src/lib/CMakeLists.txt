@@ -5,7 +5,8 @@ add_subdirectory(oracle)
 add_subdirectory(agitation)
 add_subdirectory(execution)
 add_subdirectory(io)
-add_subdirectory(core)
+add_subdirectory(pipeline)
+add_subdirectory(legacy)
 
 add_library(mlir_mracle INTERFACE)
 add_library(MLIRMRACLE::mlir_mracle ALIAS mlir_mracle)
@@ -26,6 +27,7 @@ target_link_libraries(mlir_mracle INTERFACE
     mlir_mracle_agitation
     mlir_mracle_execution
     mlir_mracle_io
-    mlir_mracle_core
+    mlir_mracle_pipeline
+    mlir_mracle_legacy
 )
 

@@ -1,4 +1,4 @@
-add_library(mlir_mracle_io STATIC io.cpp)
+add_library(mlir_mracle_io STATIC io.cpp artifacts.cpp cache.cpp)
 add_library(MLIRMRACLE::mlir_mracle_io ALIAS mlir_mracle_io)
 
 set_property(TARGET mlir_mracle_io PROPERTY CXX_STANDARD 23)
@@ -14,6 +14,8 @@ target_link_libraries(mlir_mracle_io PUBLIC
     llvm_mlir_headers
     LLVMCore
     LLVMSupport
+    LLVMBitReader
+    LLVMBitWriter
     MLIRIR
     MLIRBuiltinToLLVMIRTranslation
     MLIRLLVMToLLVMIRTranslation

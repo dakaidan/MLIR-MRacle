@@ -1,4 +1,7 @@
-#include "mlir-mracle/core/core.h"
+#include "mlir-mracle/legacy/legacy_pipeline.h"
+#include "mlir-mracle/pipeline/emit/emit_pipeline.h"
+#include "mlir-mracle/pipeline/execute/execution_pipeline.h"
+#include "mlir-mracle/pipeline/pipeline.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -114,7 +117,7 @@ int main(int argc, char **argv) {
         opts.numRuns = opts.reps;
         mlir_mracle::PipelineResult result = mlir_mracle::runEmitPipeline(opts);
         std::cout << result.campaignDir << "\n";
-        mlir_mracle::shutdownCore();
+        mlir_mracle::shutdownPipeline();
         return 0;
     }
 
@@ -122,20 +125,20 @@ int main(int argc, char **argv) {
         mlir_mracle::ExecutionPipelineResult result =
             mlir_mracle::runExecutionPipeline(opts);
         std::cout << result.campaignDir << "\n";
-        mlir_mracle::shutdownCore();
+        mlir_mracle::shutdownPipeline();
         return 0;
     }
 
     if (legacyMode) {
-        mlir_mracle::PipelineResult result = mlir_mracle::runPipeline(opts);
+        mlir_mracle::PipelineResult result = mlir_mracle::runLegacyPipeline(opts);
         std::cout << result.campaignDir << "\n";
-        mlir_mracle::shutdownCore();
+        mlir_mracle::shutdownPipeline();
         return 0;
     }
 
-    // default mode is the new-oracle agitation pipeline
-    mlir_mracle::PipelineResult result = mlir_mracle::runNewOraclePipeline(opts);
+    // default mode is the agitation-sweep oracle pipeline
+    mlir_mracle::PipelineResult result = mlir_mracle::runPipeline(opts);
     std::cout << result.campaignDir << "\n";
-    mlir_mracle::shutdownCore();
+    mlir_mracle::shutdownPipeline();
     return 0;
 }

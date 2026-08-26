@@ -226,7 +226,7 @@ def main():
     parser.add_argument(
         "--legacy", action="store_true",
         help="legacy single-thread-group pipeline instead of the default "
-             "new-oracle agitation sweep"
+             "agitation-sweep pipeline"
     )
     parser.add_argument(
         "--no-cache", action="store_true",
