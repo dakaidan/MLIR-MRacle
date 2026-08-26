@@ -14,8 +14,8 @@ bool modeFromName(const std::string &name, PipelineMode &mode) {
         mode = PipelineMode::Execute;
     } else if (name == "legacy") {
         mode = PipelineMode::Legacy;
-    } else if (name == "multi") {
-        mode = PipelineMode::Multi;
+    } else if (name == "compare") {
+        mode = PipelineMode::Compare;
     } else {
         return false;
     }
@@ -31,7 +31,7 @@ void addMode(std::vector<PipelineMode> &modes, PipelineMode mode) {
 
 void failUnknownMode(const std::string &name) {
     std::cerr << "unknown mode '" << name
-              << "' (expected emit, execution, legacy, or multi)\n";
+              << "' (expected emit, execution, legacy, or compare)\n";
     std::exit(1);
 }
 
@@ -98,7 +98,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
                      "[--iter=N] [--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
                      "[--model=NAME] "
-                     "[--mode=emit,execution,legacy,multi] "
+                     "[--mode=emit,execution,legacy,compare] "
                      "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "[--threshold=PCT] "
                      "[--reruns=N] [--max-runs=N] "
@@ -147,7 +147,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
     }
 
     if (cli.modes.empty())
-        cli.modes.push_back(PipelineMode::Multi);
+        cli.modes.push_back(PipelineMode::Compare);
 
     return cli;
 }

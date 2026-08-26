@@ -96,9 +96,9 @@ def main():
     )
     parser.add_argument("--seed", type=int, help="fixed seed for all runs")
     parser.add_argument(
-        "--mode", default="multi",
+        "--mode", default="compare",
         help="pipeline mode(s) to run, comma-separated: emit, execution, "
-             "legacy, multi (default: multi)"
+             "legacy, compare (default: compare)"
     )
     parser.add_argument(
         "--reps", type=int, default=5000,
@@ -163,13 +163,13 @@ def main():
         name = name.strip()
         if not name:
             continue
-        if name not in ("emit", "execution", "legacy", "multi"):
+        if name not in ("emit", "execution", "legacy", "compare"):
             sys.exit(f"unknown mode '{name}' (expected emit, execution, "
-                     "legacy, or multi)")
+                     "legacy, or compare)")
         if name not in modes:
             modes.append(name)
     if not modes:
-        modes.append("multi")
+        modes.append("compare")
     if "emit" in modes and not args.transform:
         sys.exit("--mode=emit requires --transform.")
 

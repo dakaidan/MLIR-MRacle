@@ -16,10 +16,45 @@ outcome sets. Drastic changes in results across the source and transformed progr
 This project investigates a metamorphic-testing approach for concurrency and
 memory models, developed during an MLSystems research internship. Conventional
 testing assumes single-thread execution and falls short on reproducibility
-because of nondeterminism and varying memory models across hardware.
-Metamorphic relations sidestep these problems, alongside the oracle problem, enabling MLIR-MRacle to be (afaik) the first MLIR fuzzer that can generate valid concurrent programs for testing, with respect to concurrency constructs and the native memory model.
+because of nondeterminism and varying memory models across hardware. Metamorphic relations sidestep these problems, alongside the oracle problem.
 
-## Pipeline
+MLIR-MRacle is (afaik) the first MLIR fuzzer that can generate valid concurrent
+programs with respect to concurrency constructs and the native
+memory model, allowing the systematic exploration of a whole class of MLIR programs that was previously out of reach.
+
+## Repository layout
+
+```text
+.
+├── mlir-mracle/
+│   ├── include/mlir-mracle/   # public headers
+│   └── src/
+│       ├── app/               # mlir_mracle_opt CLI driver
+│       └── lib/
+│           ├── agitation/     # agitates compiled variants across codegen and runtime parameters
+│           ├── backend/
+│           │   ├── jit/       # JIT-compiles LLVM modules for execution
+│           │   └── lowering/  # lowers MLIR to LLVM IR
+│           ├── context/       # shared data structures and outcome-set types
+│           ├── execution/     # runs compiled binaries and collects observed outcomes
+│           ├── io/            # serializes results and dumps IR artifacts
+│           ├── legacy/        # legacy thread-group oracle pipeline (--mode=legacy)
+│           ├── oracle/        # compares outcome sets and derives verdicts
+│           ├── pipeline/      # pipeline orchestration, emit and execution modes
+│           └── passes/        # metamorphic transformation passes
+├── fuzzing/
+│   ├── fuzz_mracle.py         # primary campaign runner
+│   └── corpus/
+│       └── seeds/             # litmus-style MLIR seed programs
+├── debug-progs/               # small MLIR programs for manual debugging
+├── CMakeLists.txt
+├── Dockerfile
+└── requirements.txt
+```
+
+## Architecture
+
+A run flows through five stages:
 
 ```mermaid
 flowchart LR
@@ -40,11 +75,9 @@ flowchart LR
 ## Features
 
 - 20+ seeded metamorphic transformations (see [Transforms](#transforms)).
-- An outcome oracle over three comparison relations — equality, subset,
-  superset — with Poisson significance tests, single-thread determinism
-  checks, and the possibility for replay rounds when results are inconclusive.
-- Agitation; random jitter insertion (via `scf.while`), differing JIT optimisation level and OpenMP team sizes and shuffling basic-block layouts.
-- Outputs go to a campaign directory: `run_info.json` JSON report collects a general report for the entire campaign and is the main source of information. Each individual run is sorted by its outcome category (`campaign/(OK|WARN|FAIL`) alongside MLIR and LLVM artifacts for further investigation.
+- A statistical oracle over equality/subset/superset relations (see [Oracle](#oracle)).
+- An agitation sweep across codegen and runtime parameters (see [Agitation sweep](#agitation-sweep)).
+- Structured campaign output with per-run JSON reports and artifacts (see [Output layout](#output-layout)).
 - Python runner and a litmus-style seed corpus.
 
 ## Quick start
@@ -80,6 +113,10 @@ docker build -t mlir-mracle .
 docker run -it --rm mlir-mracle /bin/bash
 ```
 
+> [!NOTE]
+> `mlir_mracle-smoke` is a stable Docker build target that currently just
+> echoes configuration success.
+
 ## Running MLIR-MRacle
 
 ### Python runner (recommended)
@@ -107,11 +144,20 @@ Examples:
 .venv/bin/python fuzzing/fuzz_mracle.py --mode=emit --transform=insert-fence fuzzing/corpus/seeds/iriw.mlir
 ```
 
-Key options:
+### Using the binary directly
+
+```bash
+.venv/bin/cmake --build build --target mlir_mracle_opt -j
+build/mlir-mracle/src/app/mlir_mracle_opt [options] <path-to-mlir-file>
+```
+
+The binary prints the campaign directory on stdout and accepts the same options as the Python driver.
+
+### Options
 
 | Option | Meaning |
 | --- | --- |
-| `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `multi` (default `multi`) |
+| `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `compare` (default `compare`) |
 | `--model` | memory model gate: empty = generic transforms only, `armv8` adds ARMv8-specific ones |
 | `--reps` | executions per program per thread count (default 5000) |
 | `--iter` | number of pipeline repetitions (default 1) |
@@ -124,32 +170,28 @@ Key options:
 | `--reruns` | replay-round budget (default 5000) |
 | `--max-runs` | hard cap for source runs per baseline (default 100000) |
 | `--no-cache` | disable the persistent on-disk cache |
+
 See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
-Environment: `MLIR_MRACLE_BUILD_DIR` the build directory, and
-`MLIR_MRACLE_CACHE_DIR` the artifact cache (an empty value disables caching).
 
-### Using the binary directly
-
-```bash
-.venv/bin/cmake --build build --target mlir_mracle_opt -j
-build/mlir-mracle/src/app/mlir_mracle_opt [options] <path-to-mlir-file>
-```
-
-The binary prints the campaign directory on stdout and accepts the same
-`--mode`, `--model`, `--seed`, `--iter`, `--reps`, `--transform`, `--apply`,
-`--multi`, `--campaign-dir`, `--threshold`, `--reruns`, and `--max-runs`
-options as the Python driver.
-
-## Modes
+### Pipeline Modes
 
 | Mode | What it does |
 | --- | --- |
-| `multi` (default) | compare source vs transformed under the agitation sweep and oracle |
+| `compare` (default) | compare source vs transformed under the agitation sweep and oracle |
 | `execution` | execute each file as-is; no oracle comparison, `.ll` artifacts only |
 | `emit` | apply transforms and emit the transformed MLIR only; requires `--transform` |
 | `legacy` | legacy thread-group oracle pipeline |
 
+### Environment variables
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MLIR_MRACLE_BUILD_DIR` | `<repo>/build` | Where the runner locates (and on first use builds) `mlir_mracle_opt`. |
+| `MLIR_MRACLE_CACHE_DIR` | `cache/v2` | Root of the artifact cache; an explicitly empty value disables caching. |
+
 ## Transforms
+
+Transforms are the seeded, semantics-preserving mutations applied to the cloned program; each one declares the outcome-set relation it preserves and the memory model it targets.
 
 Each transform declares the outcome-set relation it preserves; a run compares
 in the direction given by the composition of the transforms actually applied.
@@ -160,7 +202,7 @@ targeting that model.
 
 ### Generic concurrency transforms
 
-Always available under every memory model.
+Always available and valid under every memory model.
 
 | Transform | Effect | Relation |
 | --- | --- | --- |
@@ -188,13 +230,17 @@ Always available under every memory model.
 ### Memory-model-specific transforms
 
 Transforms for a specific memory model live under
-`mlir-mracle/src/lib/passes/transforms/<model>/` — e.g. the ARMv8 relaxed
-commutations in `arm/ArmTransforms.cpp`. Each declares its target via
+`mlir-mracle/src/lib/passes/transforms/<model>/` e.g. the ARMv8 relaxed
+commutations in `transforms/arm/ArmTransforms.cpp`. 
+
+Each declares its target via
 `getTarget()` (`MetamorphicTransform.h`), and `getTransforms()` in
 `MetamorphicTransform.cpp` adds it to the applicable set only when the
 requested `--model` matches.
 
 ## Agitation sweep
+
+The agitation sweep perturbs execution across codegen and runtime axes to widen the set of observable outcomes and surface rare interleavings.
 
 Each LLVM module is compiled into `binaryCount` (default 5) in-memory JIT
 variants and run under `configCount` (default 5) OpenMP team-size configs.
@@ -214,6 +260,8 @@ variants and run under `configCount` (default 5) OpenMP team-size configs.
 
 ## Oracle
 
+The oracle compares the outcome sets of source and transformed runs and issues the final verdict, using a Poisson model to judge statistical deviations.
+
 - A single-thread probe of both sides must produce the same deterministic
   outcome, or the run fails.
 - Outcome sets are compared under the run's relation (equality, subset,
@@ -224,36 +272,6 @@ variants and run under `configCount` (default 5) OpenMP team-size configs.
   before the final verdict.
 - Verdicts are `OK`, `WARN` (statistical deviation below the fail bar), or
   `FAIL` (hard behavioural change).
-
-## Repository layout
-
-```text
-.
-├── mlir-mracle/
-│   ├── include/mlir-mracle/   # public headers
-│   └── src/
-│       ├── app/               # mlir_mracle_opt CLI driver
-│       └── lib/
-│           ├── agitation/     # agitates compiled variants across codegen and runtime parameters
-│           ├── backend/
-│           │   ├── jit/       # JIT-compiles LLVM modules for execution
-│           │   └── lowering/  # lowers MLIR to LLVM IR
-│           ├── context/       # shared data structures and outcome-set types
-│           ├── execution/     # runs compiled binaries and collects observed outcomes
-│           ├── io/            # serializes results and dumps IR artifacts
-│           ├── legacy/        # legacy thread-group oracle pipeline (--mode=legacy)
-│           ├── oracle/        # compares outcome sets and derives verdicts
-│           ├── pipeline/      # pipeline orchestration, emit and execution modes
-│           └── passes/        # metamorphic transformation passes
-├── fuzzing/
-│   ├── fuzz_mracle.py         # primary campaign runner
-│   └── corpus/
-│       └── seeds/             # litmus-style MLIR seed programs
-├── debug-progs/               # small MLIR programs for manual debugging
-├── CMakeLists.txt
-├── Dockerfile
-└── requirements.txt
-```
 
 ## Output layout
 
@@ -276,9 +294,6 @@ variants.
 .venv/bin/cmake --build build --target mlir_mracle_oracle_test mlir_mracle_legacy_oracle_test -j
 ctest --test-dir build --output-on-failure
 ```
-
-`mlir_mracle-smoke` is a stable Docker build target that currently just echoes
-configuration success.
 
 ## Troubleshooting
 

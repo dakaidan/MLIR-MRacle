@@ -12,7 +12,7 @@ enum class PipelineMode {
     Emit,    // --mode=emit: transform and emit MLIR only
     Execute, // --mode=execution: execute each file as-is
     Legacy,  // --mode=legacy: legacy thread-group oracle pipeline
-    Multi,   // --mode=multi: default agitation-sweep oracle pipeline
+    Compare, // --mode=compare: default agitation-sweep oracle pipeline
 };
 
 struct CliOptions {

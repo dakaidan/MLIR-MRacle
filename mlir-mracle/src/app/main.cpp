@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
             std::cout << mlir_mracle::runLegacyPipeline(opts).campaignDir
                       << "\n";
             break;
-        case mlir_mracle::PipelineMode::Multi:
+        case mlir_mracle::PipelineMode::Compare:
             std::cout << mlir_mracle::runPipeline(opts).campaignDir << "\n";
             break;
         }
