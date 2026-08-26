@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <cmath>
 
 namespace mlir_mracle {
 namespace {

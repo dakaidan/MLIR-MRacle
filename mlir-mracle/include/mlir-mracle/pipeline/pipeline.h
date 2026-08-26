@@ -15,12 +15,9 @@ struct PipelineOptions {
     int seed = -1; // -1 = deterministic per-run seed derived from run index, >=0 = fixed
     int runNumber = 0;        // first run index
     int numRuns = 1;          // pipeline repetitions, set by --iter
-    bool straightMode = false; // --run: execute each file, no transforms
-    bool emitMLIR = false;    // --emit-mlir: transform and emit MLIR only
     int reps = 5000;           // --reps: executions per program per thread count
     std::string transform;    // comma-separated list of transforms to try, empty = any
     int maxApply = 1;         // limit of transforms to apply per run
-    int tsanPercent = 100;    // 0-100; % of compilations instrumented with TSan
     std::string campaignDir;  // output folder; runs are added as they complete
     int retestReps = 5000;    // extra source runs when transformed finds a new outcome
     int maxSourceReps = 100000; // hard cap for total source runs across all binaries

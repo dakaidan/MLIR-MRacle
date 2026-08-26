@@ -4,11 +4,11 @@
 
 namespace mlir_mracle {
 
-// single run mode of the legacy --tsan pipeline, returns a RunInfo struct
+// single run mode of the legacy pipeline, returns a RunInfo struct
 // with the results of the run.
 RunInfo runLegacySingle(const std::string &inputFile, int seed, int runIdx,
                         const std::string &transform, int maxApply,
-                        int tsanPercent, int reps, int retestReps,
+                        int reps, int retestReps,
                         int maxSourceReps, int thresholdPct);
 
 // core pipeline function for --legacy: runs the metamorphic testing pipeline

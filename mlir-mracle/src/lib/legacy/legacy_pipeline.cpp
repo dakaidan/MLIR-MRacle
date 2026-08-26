@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -68,11 +67,11 @@ static OutcomeSetResult judgeOutcomeSets(OutcomeRelation relation,
 
 
 
-// single run mode of the legacy --tsan pipeline, returns a RunInfo struct
+// single run mode of the legacy pipeline, returns a RunInfo struct
 // with the results of the run.
 RunInfo runLegacySingle(const std::string &inputFile, int seed,
                          int runIdx, const std::string &transform,
-                         int maxApply, int tsanPercent, int reps,
+                         int maxApply, int reps,
                          int retestReps, int maxSourceReps,
                          int thresholdPct) {
     MLIRSetup setup(seed, runIdx, transform, maxApply);
@@ -126,13 +125,8 @@ RunInfo runLegacySingle(const std::string &inputFile, int seed,
     setup.runInfo.sourceJitLLVM = memo.sourceJitLLVM;
 
     // TSan instruments memory accesses and perturbs scheduling, surfacing
-    // rare outcomes; the percentage of runs instrumented is configurable
-    // (100% by default). The decision is made per run (seeded, so
-    // reproducible) and applies to both modules so the comparison is never
-    // between differently-instrumented code.
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<int> tsanDist(0, 99);
-    bool useTsan = tsanDist(rng) < tsanPercent;
+    // rare outcomes; every run is instrumented (the historical default).
+    const bool useTsan = true;
 
     std::string compileError;
 
@@ -362,7 +356,7 @@ PipelineResult runLegacyPipeline(const PipelineOptions &opts) {
         // here
         RunInfo info = runLegacySingle(inputFile, runSeed, runIdx,
                                  opts.transform, opts.maxApply,
-                                 opts.tsanPercent, opts.reps,
+                                 opts.reps,
                                  opts.retestReps, opts.maxSourceReps,
                                  opts.thresholdPct);
 

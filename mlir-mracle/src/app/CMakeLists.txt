@@ -9,7 +9,7 @@ if(APPLE AND NOT OpenMP_ROOT)
 endif()
 find_package(OpenMP REQUIRED)
 
-add_executable(mlir_mracle_opt main.cpp)
+add_executable(mlir_mracle_opt main.cpp cli.cpp)
 set_property(TARGET mlir_mracle_opt PROPERTY CXX_STANDARD 23)
 set_property(TARGET mlir_mracle_opt PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET mlir_mracle_opt PROPERTY CXX_EXTENSIONS OFF)
