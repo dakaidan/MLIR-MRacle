@@ -80,7 +80,7 @@ docker build -t mlir-mracle .
 docker run -it --rm mlir-mracle /bin/bash
 ```
 
-## Run a campaign
+## Running MLIR-MRacle
 
 ### Python runner (recommended)
 
@@ -138,8 +138,7 @@ build/mlir-mracle/src/app/mlir_mracle_opt [options] <path-to-mlir-file>
 The binary prints the campaign directory on stdout and accepts the same
 `--mode`, `--model`, `--seed`, `--iter`, `--reps`, `--transform`, `--apply`,
 `--multi`, `--campaign-dir`, `--threshold`, `--reruns`, and `--max-runs`
-options, plus the `--run`, `--legacy`, `--new-oracle`, and `--emit-mlir`
-aliases.
+options as the Python driver.
 
 ## Modes
 
@@ -242,7 +241,7 @@ variants and run under `configCount` (default 5) OpenMP team-size configs.
 │           ├── context/       # shared data structures and outcome-set types
 │           ├── execution/     # runs compiled binaries and collects observed outcomes
 │           ├── io/            # serializes results and dumps IR artifacts
-│           ├── legacy/        # legacy thread-group oracle pipeline (--legacy)
+│           ├── legacy/        # legacy thread-group oracle pipeline (--mode=legacy)
 │           ├── oracle/        # compares outcome sets and derives verdicts
 │           ├── pipeline/      # pipeline orchestration, emit and execution modes
 │           └── passes/        # metamorphic transformation passes

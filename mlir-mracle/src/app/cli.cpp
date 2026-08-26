@@ -44,14 +44,6 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
     for (int i = 0; i < argc; ++i) {
         if (std::strncmp(argv[i], "--seed=", 7) == 0) {
             cli.pipeline.seed = std::strtol(argv[i] + 7, nullptr, 10);
-        } else if (std::strcmp(argv[i], "--run") == 0) {
-            addMode(cli.modes, PipelineMode::Execute);
-        } else if (std::strcmp(argv[i], "--legacy") == 0) {
-            addMode(cli.modes, PipelineMode::Legacy);
-        } else if (std::strcmp(argv[i], "--new-oracle") == 0) {
-            addMode(cli.modes, PipelineMode::Multi);
-        } else if (std::strcmp(argv[i], "--emit-mlir") == 0) {
-            addMode(cli.modes, PipelineMode::Emit);
         } else if (std::strncmp(argv[i], "--mode=", 7) == 0) {
             const char *value = argv[i] + 7;
             if (!*value) {
@@ -103,8 +95,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
 
     if (cli.pipeline.multiFolder.empty() && argc < 2) {
         std::cerr << "usage: mlir_mracle-opt [--seed=N] "
-                     "[--iter=N] [--emit-mlir] [--run] [--legacy] "
-                     "[--reps=N] "
+                     "[--iter=N] [--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
                      "[--model=NAME] "
                      "[--mode=emit,execution,legacy,multi] "
@@ -151,7 +142,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
         if (mode == PipelineMode::Emit)
             emit = true;
     if (emit && cli.pipeline.transform.empty()) {
-        std::cerr << "--emit-mlir requires --transform\n";
+        std::cerr << "--mode=emit requires --transform\n";
         std::exit(1);
     }
 

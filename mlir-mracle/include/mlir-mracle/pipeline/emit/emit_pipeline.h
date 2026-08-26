@@ -10,7 +10,7 @@ RunInfo emitSingle(const std::string &inputFile, int seed, int runIdx,
                    const std::string &transform, int maxApply,
                    const std::string &model);
 
-// generator mode for --emit-mlir: applies the requested transforms to one
+// generator mode for --mode=emit: applies the requested transforms to one
 // file or random files from a folder and returns the transformed MLIR text.
 // Each run is written to the output folder as it completes; there is no
 // execution state.

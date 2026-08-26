@@ -11,7 +11,7 @@ RunInfo runLegacySingle(const std::string &inputFile, int seed, int runIdx,
                         int reps, int retestReps,
                         int maxSourceReps, int thresholdPct);
 
-// core pipeline function for --legacy: runs the metamorphic testing pipeline
+// core pipeline function for --mode=legacy: runs the metamorphic testing pipeline
 // (per-thread-count baseline cache + TSan instrumentation) for the given
 // options; returns a PipelineResult struct with the results of all runs
 PipelineResult runLegacyPipeline(const PipelineOptions &opts);

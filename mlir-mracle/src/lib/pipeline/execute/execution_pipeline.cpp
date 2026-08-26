@@ -57,9 +57,10 @@ ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     return result;
 }
 
-// core pipeline function for --run: executes each input file as-is and
-// records joint outcome frequencies per thread count. Each run is published
-// to the campaign folder as it completes; there is no status classification.
+// core pipeline function for --mode=execution: executes each input file
+// as-is and records joint outcome frequencies per thread count. Each run
+// is published to the campaign folder as it completes; there is no status
+// classification.
 ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
     ExecutionPipelineResult result;
     result.runs.reserve(opts.numRuns);
