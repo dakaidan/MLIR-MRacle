@@ -80,6 +80,8 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
             if (!cli.pipeline.transform.empty())
                 cli.pipeline.transform += ",";
             cli.pipeline.transform += argv[i] + 12;
+        } else if (std::strncmp(argv[i], "--model=", 8) == 0) {
+            cli.pipeline.model = argv[i] + 8;
         } else if (std::strncmp(argv[i], "--multi=", 8) == 0) {
             cli.pipeline.multiFolder = argv[i] + 8;
         } else if (std::strncmp(argv[i], "--apply=", 8) == 0) {
@@ -104,6 +106,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
                      "[--iter=N] [--emit-mlir] [--run] [--legacy] "
                      "[--reps=N] "
                      "[--transform=NAME[,NAME...]] [--apply=N] "
+                     "[--model=NAME] "
                      "[--mode=emit,execution,legacy,multi] "
                      "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "[--threshold=PCT] "

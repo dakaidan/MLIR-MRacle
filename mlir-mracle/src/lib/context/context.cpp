@@ -52,12 +52,12 @@ void initializeMLIRContext(mlir::MLIRContext &ctx) {
 }
 
 MLIRSetup::MLIRSetup(int seed, int runNumber, std::string transform,
-                     int maxApply)
+                     int maxApply, std::string model)
     : pm(&mlirContext, mlir::ModuleOp::getOperationName()) {
     runInfo.seed = seed;
     runInfo.runNumber = runNumber;
     pm.addPass(::mlir::createMetamorphicPass(seed, &runInfo, transform,
-                                            maxApply));
+                                            maxApply, model));
     initializeMLIRContext(mlirContext);
 }
 

@@ -94,7 +94,7 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
 // merged data.
 RunInfo runSingle(const std::string &inputFile, int seed,
                   int runIdx, const PipelineOptions &opts) {
-    MLIRSetup setup(seed, runIdx, opts.transform, opts.maxApply);
+    MLIRSetup setup(seed, runIdx, opts.transform, opts.maxApply, opts.model);
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;

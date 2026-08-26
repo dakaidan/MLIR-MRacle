@@ -23,6 +23,16 @@ ObservedOutcomeSet collectOutcomeSet(
 ObservedOutcomeSet mergeOutcomeSets(const ObservedOutcomeSet &a,
                                     const ObservedOutcomeSet &b);
 
+// Pins the OpenMP runtime's process-wide settings before any parallel region
+// initialises it: dynamic adjustment is off so omp_set_num_threads stays
+// authoritative, and the default team size is fixed. Values are forced so a
+// pre-existing environment cannot change them; idempotent.
+void applyProcessSettings();
+
+// Spreads totalRuns evenly across configs; the first totalRuns %
+// configs.size() configs receive one extra run each.
+void distributeRuns(std::vector<AgitationConfig> &configs, int totalRuns);
+
 struct BinaryConfigResult {
     int configIndex = 0;
     AgitationConfig config;
@@ -87,5 +97,10 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
 // invalidates.
 void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
                       uint32_t roundSeed, int configCount = 5);
+
+// Pointers to every compiled binary (source then transformed), in binary
+// index order.
+std::vector<const CompiledBinary *>
+collectAllBinaries(const ExecutionResult &exec);
 
 } // namespace mlir_mracle

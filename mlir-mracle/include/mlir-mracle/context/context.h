@@ -138,7 +138,7 @@ struct MLIRSetup {
     RunInfo runInfo;
 
     MLIRSetup(int seed = 42, int runNumber = 0, std::string transform = "",
-              int maxApply = 1);
+              int maxApply = 1, std::string model = "");
 };
 
 } // namespace mlir_mracle

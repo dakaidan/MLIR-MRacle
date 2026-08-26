@@ -297,9 +297,10 @@ JsonValue relationToJson(OutcomeRelation relation) {
     return obj;
 }
 
-} // namespace
-
-JsonValue runInfoToJson(const RunInfo &info) {
+// metadata fields shared by every run-info JSON representation; field order is
+// significant (ordered JsonValue), so per-representation fields must be
+// appended after this
+JsonValue runMetadataToJson(const RunInfo &info) {
     JsonValue obj = jsonObject();
     jsonPut(obj, "run", jsonInt(info.runNumber));
     jsonPut(obj, "file", jsonString(info.file));
@@ -316,6 +317,12 @@ JsonValue runInfoToJson(const RunInfo &info) {
     jsonPut(obj, "seed", jsonInt(info.seed));
     jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
     return obj;
+}
+
+} // namespace
+
+JsonValue runInfoToJson(const RunInfo &info) {
+    return runMetadataToJson(info);
 }
 
 std::string runStatusString(const RunInfo &info) {
@@ -333,21 +340,7 @@ std::string runStatusString(const RunInfo &info) {
 }
 
 JsonValue runInfoToStatusJson(const RunInfo &info) {
-    JsonValue obj = jsonObject();
-    jsonPut(obj, "run", jsonInt(info.runNumber));
-    jsonPut(obj, "file", jsonString(info.file));
-    jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
-    jsonPut(obj, "relation", relationToJson(info.relation));
-
-    std::string status = runStatusString(info);
-    jsonPut(obj, "status", jsonString(status));
-
-    std::string message = runMessage(info);
-    if (!message.empty())
-        jsonPut(obj, "message", jsonString(message));
-
-    jsonPut(obj, "seed", jsonInt(info.seed));
-    jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
+    JsonValue obj = runMetadataToJson(info);
 
     JsonValue threads = jsonArray();
     for (const auto &tg : info.threadResults)
@@ -357,21 +350,7 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
 }
 
 JsonValue runInfoToUnionJson(const RunInfo &info) {
-    JsonValue obj = jsonObject();
-    jsonPut(obj, "run", jsonInt(info.runNumber));
-    jsonPut(obj, "file", jsonString(info.file));
-    jsonPut(obj, "applied", appliedTransformsToJson(info.appliedTransforms));
-    jsonPut(obj, "relation", relationToJson(info.relation));
-
-    std::string status = runStatusString(info);
-    jsonPut(obj, "status", jsonString(status));
-
-    std::string message = runMessage(info);
-    if (!message.empty())
-        jsonPut(obj, "message", jsonString(message));
-
-    jsonPut(obj, "seed", jsonInt(info.seed));
-    jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
+    JsonValue obj = runMetadataToJson(info);
 
     jsonPut(obj, "source_runs", jsonInt(info.sourceRuns));
     jsonPut(obj, "transformed_runs", jsonInt(info.transformedRuns));

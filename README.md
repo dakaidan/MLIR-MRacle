@@ -197,7 +197,8 @@ Safe for any memory model.
 | --- | --- | --- |
 | `insert-fence` | insert `omp.flush` inside a thread region | subset |
 | `remove-fence` | remove a random `omp.flush` | superset |
-| `insert-flush-around-seq-cst` | flush around a seq_cst atomic op | equality |
+| `insert-fence-between-mem-ops` | insert `omp.flush` between atomic memory ops | subset |
+| `insert-fence-around-seq-cst` | `omp.flush` around a seq_cst atomic op | equality |
 | `insert-atomic-cas` | no-op CAS on a fresh thread-local location | equality |
 | `insert-atomic-write` | atomic write of 0 to a thread-local dummy | equality |
 | `insert-atomic-read` | atomic read of an in-scope memref | equality |
@@ -218,9 +219,6 @@ Safe for any memory model.
 ### ARMv8
 
 Three transforms are ARMv8-specific with behaviour changing on either stronger or weaker memory models. They are marked `ARMv8 Safe` in `MetamorphicPass.cpp`:
-
-- `insert-fence-between-mem-ops` — redundant on memory models stronger than
-  ARMv8
 - `commute-relaxed-read-write` — not possible on stronger memory models
 - `commute-relaxed-write-write` — as above
 

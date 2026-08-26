@@ -19,7 +19,10 @@ def MetamorphicPass : Pass<"MetamorphicPass", "::mlir::ModuleOp"> {
       Option<"transform", "transform", "std::string", "",
              "Comma-separated list of transforms to try (empty = pick at random)">,
       Option<"maxApply", "apply", "int", "1",
-             "Limit on the number of successful transformations applied to a single function">
+             "Limit on the number of successful transformations applied to a single function">,
+      Option<"model", "model", "std::string", "",
+             "Memory model gating the applicable transforms: empty = generic "
+             "transforms only; \"armv8\" adds the ARMv8-specific ones">
     ];
 
     let dependentDialects = [

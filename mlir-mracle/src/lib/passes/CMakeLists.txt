@@ -7,6 +7,8 @@ include_directories(${MLIRMRACLE_TABLEGEN_INCLUDES})
 mlir_tablegen(MetamorphicPass.inc -gen-pass-decls -name Metamorphic)
 add_public_tablegen_target(MLIRMRACLEMetamorphicPassIncGen)
 
+add_subdirectory(transforms)
+
 add_library(mlir_mracle_passes STATIC MetamorphicPass.cpp)
 add_library(MLIRMRACLE::mlir_mracle_passes ALIAS mlir_mracle_passes)
 target_compile_options(mlir_mracle_passes PRIVATE -fno-rtti)
@@ -23,6 +25,7 @@ target_include_directories(mlir_mracle_passes PUBLIC
 )
 
 target_link_libraries(mlir_mracle_passes PUBLIC
+    mlir_mracle_transforms
     llvm_mlir_headers
     MLIRIR
     MLIRPass

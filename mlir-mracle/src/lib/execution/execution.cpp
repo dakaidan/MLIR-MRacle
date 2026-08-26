@@ -11,13 +11,6 @@ namespace mlir_mracle {
 
 namespace {
 
-void applyProcessSettings() {
-    // OMP_DYNAMIC is read only at OpenMP runtime initialisation, so it is
-    // pinned once process-wide; per-config variation uses
-    // omp_set_num_threads only.
-    setenv("OMP_DYNAMIC", "false", 1);
-}
-
 void applyConfig(const AgitationConfig &cfg) {
     omp_set_num_threads(cfg.omp.numThreads);
 }
@@ -48,6 +41,33 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
 }
 
 } // namespace
+
+void applyProcessSettings() {
+    // OMP_DYNAMIC and OMP_NUM_THREADS are read only at OpenMP runtime
+    // initialisation, so they are pinned once process-wide; per-config
+    // variation uses omp_set_num_threads only.
+    setenv("OMP_DYNAMIC", "false", 1);
+    setenv("OMP_NUM_THREADS", "2", 1);
+}
+
+void distributeRuns(std::vector<AgitationConfig> &configs, int totalRuns) {
+    int base = totalRuns / static_cast<int>(configs.size());
+    int rem = totalRuns % static_cast<int>(configs.size());
+    for (size_t i = 0; i < configs.size(); ++i)
+        configs[i].runs = base + (static_cast<int>(i) < rem ? 1 : 0);
+}
+
+std::vector<const CompiledBinary *>
+collectAllBinaries(const ExecutionResult &exec) {
+    std::vector<const CompiledBinary *> binaries;
+    binaries.reserve(exec.sourceBinaries.size() +
+                     exec.transformedBinaries.size());
+    for (const auto &b : exec.sourceBinaries)
+        binaries.push_back(&b);
+    for (const auto &b : exec.transformedBinaries)
+        binaries.push_back(&b);
+    return binaries;
+}
 
 ObservedOutcomeSet collectOutcomeSet(
     const std::function<std::vector<int64_t>()> &fn, int numRuns,
@@ -129,10 +149,7 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
         result.error = "no agitation configs generated";
         return result;
     }
-    int base = opts.runsPerBinary / static_cast<int>(configs.size());
-    int rem = opts.runsPerBinary % static_cast<int>(configs.size());
-    for (size_t i = 0; i < configs.size(); ++i)
-        configs[i].runs = base + (static_cast<int>(i) < rem ? 1 : 0);
+    distributeRuns(configs, opts.runsPerBinary);
 
     applyProcessSettings();
 
@@ -181,18 +198,9 @@ void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
     if (runConfigs.empty())
         return;
 
-    int base = extraRuns / static_cast<int>(runConfigs.size());
-    int rem = extraRuns % static_cast<int>(runConfigs.size());
-    for (size_t i = 0; i < runConfigs.size(); ++i)
-        runConfigs[i].runs = base + (static_cast<int>(i) < rem ? 1 : 0);
+    distributeRuns(runConfigs, extraRuns);
 
-    std::vector<const CompiledBinary *> binaries;
-    binaries.reserve(exec.sourceBinaries.size() +
-                     exec.transformedBinaries.size());
-    for (const auto &b : exec.sourceBinaries)
-        binaries.push_back(&b);
-    for (const auto &b : exec.transformedBinaries)
-        binaries.push_back(&b);
+    std::vector<const CompiledBinary *> binaries = collectAllBinaries(exec);
 
     // the per-config breakdown describes the initial batch only; replay
     // rounds merge straight into the per-binary threaded totals

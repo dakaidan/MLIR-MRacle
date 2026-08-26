@@ -74,7 +74,9 @@ RunInfo runLegacySingle(const std::string &inputFile, int seed,
                          int maxApply, int reps,
                          int retestReps, int maxSourceReps,
                          int thresholdPct) {
-    MLIRSetup setup(seed, runIdx, transform, maxApply);
+    // the legacy pipeline has no --model option; it always runs the ARMv8
+    // transform set to preserve its historical behaviour
+    MLIRSetup setup(seed, runIdx, transform, maxApply, "armv8");
     std::vector<PendingBaseline> pendingBaselines;
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;

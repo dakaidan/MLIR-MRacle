@@ -7,7 +7,8 @@ namespace mlir_mracle {
 // emit mode single run: apply the requested transforms and return the
 // resulting MLIR without lowering, JIT, or oracle comparison
 RunInfo emitSingle(const std::string &inputFile, int seed, int runIdx,
-                   const std::string &transform, int maxApply);
+                   const std::string &transform, int maxApply,
+                   const std::string &model);
 
 // generator mode for --emit-mlir: applies the requested transforms to one
 // file or random files from a folder and returns the transformed MLIR text.

@@ -1,19 +1,14 @@
 #include "mlir-mracle/app/cli.h"
+#include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/legacy/legacy_pipeline.h"
 #include "mlir-mracle/pipeline/emit/emit_pipeline.h"
 #include "mlir-mracle/pipeline/execute/execution_pipeline.h"
 #include "mlir-mracle/pipeline/pipeline.h"
 
-#include <cstdlib>
 #include <iostream>
 
 int main(int argc, char **argv) {
-    // Fix the OpenMP runtime's team sizing before any parallel region can
-    // initialise it: dynamic adjustment is off so omp_set_num_threads stays
-    // authoritative. Values are forced so a pre-existing environment cannot
-    // change them.
-    setenv("OMP_DYNAMIC", "false", 1);
-    setenv("OMP_NUM_THREADS", "2", 1);
+    mlir_mracle::applyProcessSettings();
 
     mlir_mracle::CliOptions cli = mlir_mracle::parsePipelineOptions(argc, argv);
 

@@ -190,6 +190,12 @@ def main():
         help="maximum number of transformations to apply per run"
     )
     parser.add_argument(
+        "--model", default="",
+        help="memory model gating the applicable transforms: empty = generic "
+             "transforms only; 'armv8' adds the ARMv8-specific ones "
+             "(default: generic only)"
+    )
+    parser.add_argument(
         "--sanitizers", default="thread",
         help="sanitizer build to use: 'thread' (default), 'address,undefined', "
              "or 'none' (separate build dir per config; ASan and TSan are "
@@ -267,6 +273,7 @@ def main():
     cmd.append(f"--reps={args.reps}")
     cmd.append(f"--iter={args.iter}")
     cmd.append(f"--apply={args.apply}")
+    cmd.append(f"--model={args.model}")
     cmd.append(f"--threshold={args.threshold}")
     cmd.append(f"--reruns={args.reruns}")
     cmd.append(f"--max-runs={args.max_runs}")

@@ -14,8 +14,8 @@ namespace mlir_mracle {
 // resulting MLIR without lowering, JIT, or oracle comparison
 RunInfo emitSingle(const std::string &inputFile, int seed,
                           int runIdx, const std::string &transform,
-                          int maxApply) {
-    MLIRSetup setup(seed, runIdx, transform, maxApply);
+                          int maxApply, const std::string &model) {
+    MLIRSetup setup(seed, runIdx, transform, maxApply, model);
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
     if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
@@ -74,7 +74,7 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
         std::string inputFile =
             pickInputFile(opts, multiFiles, runIdx, runSeed);
         RunInfo run = emitSingle(inputFile, runSeed, runIdx, opts.transform,
-                                 opts.maxApply);
+                                 opts.maxApply, opts.model);
         std::string base = "run" + std::to_string(run.runNumber) +
                            "_seed" + std::to_string(run.seed);
         bool ok = run.error.empty() && !run.transformedMLIR.empty();
