@@ -163,16 +163,13 @@ def main():
     )
     parser.add_argument("--seed", type=int, help="fixed seed for all runs")
     parser.add_argument(
-        "--run", action="store_true",
-        help="execution mode: run each file as-is, record joint outcome sets"
-    )
-    parser.add_argument(
-        "--emit-mlir", action="store_true",
-        help="generator mode: emit transformed MLIR files without executing"
+        "--mode", default="multi",
+        help="pipeline mode(s) to run, comma-separated: emit, execution, "
+             "legacy, multi (default: multi)"
     )
     parser.add_argument(
         "--reps", type=int, default=5000,
-        help="with --emit-mlir: number of times transformations are picked "
+        help="with --mode=emit: number of times transformations are picked "
              "and applied; otherwise: executions per program per thread "
              "count (default 5000)"
     )
@@ -193,11 +190,6 @@ def main():
         help="maximum number of transformations to apply per run"
     )
     parser.add_argument(
-        "--tsan", type=int, default=None,
-        help="percentage of compilations instrumented with TSan (0-100, "
-             "default 100; forced to 0 for non-TSan builds)"
-    )
-    parser.add_argument(
         "--sanitizers", default="thread",
         help="sanitizer build to use: 'thread' (default), 'address,undefined', "
              "or 'none' (separate build dir per config; ASan and TSan are "
@@ -205,12 +197,12 @@ def main():
     )
     parser.add_argument(
         "--campaign-dir", metavar="PATH",
-        help="resume/continue a campaign, or output directory with --emit-mlir"
+        help="resume/continue a campaign, or set the output directory for --mode=emit"
     )
     parser.add_argument(
         "--threshold", type=int, default=5,
-        help="fail threshold: an outcome rare in the source (below this % of "
-             "its runs) appearing at/above this % of transformed runs FAILs; "
+        help="fail threshold: an outcome rare in the source (below this %% of "
+             "its runs) appearing at/above this %% of transformed runs FAILs; "
              "other rate deviations beyond the Poisson bound WARN (default 5)"
     )
     parser.add_argument(
@@ -223,11 +215,6 @@ def main():
         help="hard cap for source runs per baseline (default 100000)"
     )
     parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mracle_opt")
-    parser.add_argument(
-        "--legacy", action="store_true",
-        help="legacy single-thread-group pipeline instead of the default "
-             "agitation-sweep pipeline"
-    )
     parser.add_argument(
         "--no-cache", action="store_true",
         help="disable the persistent on-disk cache (no state survives "
@@ -243,10 +230,21 @@ def main():
         sys.exit("--apply must be >= 0.")
     if args.reps <= 0:
         sys.exit("--reps must be > 0.")
-    if args.run and args.emit_mlir:
-        sys.exit("Cannot combine --run and --emit-mlir.")
-    if args.emit_mlir and not args.transform:
-        sys.exit("--emit-mlir requires --transform.")
+
+    modes = []
+    for name in args.mode.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        if name not in ("emit", "execution", "legacy", "multi"):
+            sys.exit(f"unknown mode '{name}' (expected emit, execution, "
+                     "legacy, or multi)")
+        if name not in modes:
+            modes.append(name)
+    if not modes:
+        modes.append("multi")
+    if "emit" in modes and not args.transform:
+        sys.exit("--mode=emit requires --transform.")
 
     sanitizers = ",".join(sorted(
         s.strip() for s in args.sanitizers.lower().split(",") if s.strip()
@@ -256,8 +254,6 @@ def main():
     if "address" in sanitizers and "thread" in sanitizers:
         sys.exit("ASan and TSan must not be combined in one build; "
                  "run separate campaigns per sanitizer")
-    if args.tsan is None:
-        args.tsan = 100 if sanitizers == "thread" else 0
 
     binary = Path(args.binary) if args.binary else find_binary(sanitizers)
     if not binary:
@@ -267,23 +263,13 @@ def main():
     cmd = [str(binary)]
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
-    if args.emit_mlir:
-        cmd.append("--emit-mlir")
-    elif args.run:
-        cmd.append("--run")
-    if args.emit_mlir:
-        cmd.append(f"--reps={args.reps}")
-        cmd.append(f"--apply={args.apply}")
-    else:
-        cmd.append(f"--reps={args.reps}")
-        cmd.append(f"--iter={args.iter}")
-        cmd.append(f"--apply={args.apply}")
-        cmd.append(f"--tsan={args.tsan}")
-        cmd.append(f"--threshold={args.threshold}")
-        cmd.append(f"--reruns={args.reruns}")
-        cmd.append(f"--max-runs={args.max_runs}")
-    if args.legacy:
-        cmd.append("--legacy")
+    cmd.append(f"--mode={','.join(modes)}")
+    cmd.append(f"--reps={args.reps}")
+    cmd.append(f"--iter={args.iter}")
+    cmd.append(f"--apply={args.apply}")
+    cmd.append(f"--threshold={args.threshold}")
+    cmd.append(f"--reruns={args.reruns}")
+    cmd.append(f"--max-runs={args.max_runs}")
     transforms = []
     for value in args.transform:
         transforms.extend(
@@ -314,70 +300,55 @@ def main():
         sys.stderr.write(result.stderr)
         sys.exit(result.returncode)
 
-    campaign_dir = result.stdout.strip()
-    if not campaign_dir:
+    campaign_dirs = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    if len(campaign_dirs) != len(modes):
         sys.stderr.write(result.stderr)
-        sys.exit("no campaign dir on stdout")
+        sys.exit(f"expected {len(modes)} campaign dir(s) on stdout, "
+                 f"got {len(campaign_dirs)}")
 
-    if sanitizer_hits:
+    for campaign_dir in campaign_dirs:
         save_sanitizer_log(campaign_dir, result.stderr)
 
-    if args.emit_mlir:
-        out_dir = Path(campaign_dir)
-        generated = sorted(out_dir.glob("run*_seed*.mlir"))
-        errors = sorted(out_dir.glob("run*_seed*.error.txt"))
-        print("=== Emit completed ===")
-        print(f"Generated: {len(generated)}  Errors: {len(errors)}")
-        if sanitizer_hits:
-            for line in sanitizer_hits[:20]:
-                print(line, file=sys.stderr)
-            print(f"Sanitizer warnings detected; campaign classified as ERROR "
-                  f"({len(sanitizer_hits)} hit lines, see sanitizer.log)")
-        print(f"Output directory: {campaign_dir}")
-        return 1 if sanitizer_hits or errors else 0
-
-    result_path = Path(campaign_dir) / "result.json"
-    try:
-        runs = json.loads(result_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        sys.stderr.write(result.stderr)
-        sys.exit(f"failed to read {result_path}: {exc}")
-
-    if args.run:
-        ok = fail = 0
-        for run in runs:
-            if run.get("error"):
-                fail += 1
-            else:
-                ok += 1
-        print("=== Campaign completed ===")
-        print(f"OK: {ok}  WARN: 0  FAIL: {fail}")
-        if sanitizer_hits:
-            for line in sanitizer_hits[:20]:
-                print(line, file=sys.stderr)
-            print(f"Sanitizer warnings detected; campaign classified as ERROR "
-                  f"({len(sanitizer_hits)} hit lines, see sanitizer.log)")
-        print(f"Campaign directory: {campaign_dir}")
-        return 1 if sanitizer_hits else 0
-
     ok = warn = fail = 0
-    for run in runs:
-        status = run.get("status", "OK")
-        if status == "ERROR":
-            fail += 1
-        elif status == "WARN":
-            warn += 1
-        else:
-            ok += 1
+    emitted = emit_errors = 0
+    for mode, campaign_dir in zip(modes, campaign_dirs):
+        if mode == "emit":
+            out_dir = Path(campaign_dir)
+            emitted += len(list(out_dir.glob("run*_seed*.mlir")))
+            emit_errors += len(list(out_dir.glob("run*_seed*.error.txt")))
+            continue
+        result_path = Path(campaign_dir) / "result.json"
+        try:
+            runs = json.loads(result_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            sys.stderr.write(result.stderr)
+            sys.exit(f"failed to read {result_path}: {exc}")
+        for run in runs:
+            if mode == "execution":
+                if run.get("error"):
+                    fail += 1
+                else:
+                    ok += 1
+            else:
+                status = run.get("status", "OK")
+                if status == "ERROR":
+                    fail += 1
+                elif status == "WARN":
+                    warn += 1
+                else:
+                    ok += 1
+
     print("=== Campaign completed ===")
+    if emitted or emit_errors:
+        print(f"Emitted MLIR: {emitted}  Errors: {emit_errors}")
     print(f"OK: {ok}  WARN: {warn}  FAIL: {fail}")
     if sanitizer_hits:
         for line in sanitizer_hits[:20]:
             print(line, file=sys.stderr)
         print(f"Sanitizer warnings detected; campaign classified as ERROR "
               f"({len(sanitizer_hits)} hit lines, see sanitizer.log)")
-    print(f"Campaign directory: {campaign_dir}")
-    return 1 if sanitizer_hits else 0
+    print(f"Campaign directory: {', '.join(campaign_dirs)}")
+    return 1 if sanitizer_hits or emit_errors else 0
 
 
 if __name__ == "__main__":
