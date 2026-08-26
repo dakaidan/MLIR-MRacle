@@ -1,5 +1,8 @@
 #include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/agitation/agitation.h"
+#include "mlir-mracle/backend/jit/jit.h"
+
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <cstdlib>
 #include <map>
@@ -227,6 +230,84 @@ void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
                 mergeOutcomeSets(exec.transformedTotal, br.threadedTotal);
     }
     exec.total = mergeOutcomeSets(exec.sourceTotal, exec.transformedTotal);
+}
+
+bool runTsanTriage(const llvm::Module &sourceModule,
+                   const llvm::Module &transformedModule,
+                   ExecutionResult &exec, int extraRuns, uint32_t triageSeed,
+                   int configCount, std::string *error) {
+    if (error)
+        error->clear();
+    if (extraRuns <= 0)
+        return true;
+
+    std::vector<AgitationConfig> triageConfigs =
+        generateAgitationConfigs(triageSeed, configCount);
+    if (triageConfigs.empty())
+        return true;
+    distributeRuns(triageConfigs, extraRuns);
+
+    // one TSan-instrumented binary per side; the agitation sweep already
+    // sampled the codegen axis plain, so the triage only adds the scheduling
+    // perturbation axis
+    std::string compileError;
+    std::vector<CompiledBinary> tsanBinaries;
+    tsanBinaries.reserve(2);
+    for (const auto &entry :
+         {std::pair<const llvm::Module *, std::string>{
+              &sourceModule, "source"},
+          {&transformedModule, "transformed"}}) {
+        std::string err;
+        auto fn = compileLLVMModuleToFunction(llvm::CloneModule(*entry.first),
+                                              &err, /*enableTsan=*/true,
+                                              /*jitOptLevel=*/2);
+        if (!fn) {
+            compileError = err;
+            break;
+        }
+        tsanBinaries.push_back({entry.second, 0, 2, std::move(fn)});
+    }
+    if (!compileError.empty()) {
+        if (error)
+            *error = compileError;
+        return false;
+    }
+
+    applyProcessSettings();
+    std::vector<BinaryExecutionResult> triageResults;
+    triageResults.reserve(2);
+    int binaryIndex = static_cast<int>(exec.sourceBinaries.size() +
+                                       exec.transformedBinaries.size());
+    for (const auto &binary : tsanBinaries) {
+        // single-thread probes stay with the plain binaries: the determinism
+        // check must not see the TSan perturbation
+        triageResults.push_back(runBinary(binary, triageConfigs,
+                                          /*singleThreadRuns=*/0,
+                                          binaryIndex++));
+    }
+
+    // keep binaryResults grouped source-then-transformed so the per-binary
+    // outcome breakdown maps back to the binary lists by index; the source
+    // triage result is spliced in before the transformed section
+    size_t sourceEnd = exec.sourceBinaries.size();
+    for (size_t i = 0; i < triageResults.size(); ++i) {
+        BinaryExecutionResult &br = triageResults[i];
+        if (br.side == "source") {
+            exec.sourceBinaries.push_back(tsanBinaries[i]);
+            exec.sourceTotal =
+                mergeOutcomeSets(exec.sourceTotal, br.threadedTotal);
+            exec.binaryResults.insert(exec.binaryResults.begin() + sourceEnd,
+                                      std::move(br));
+            ++sourceEnd;
+        } else {
+            exec.transformedBinaries.push_back(tsanBinaries[i]);
+            exec.transformedTotal =
+                mergeOutcomeSets(exec.transformedTotal, br.threadedTotal);
+            exec.binaryResults.push_back(std::move(br));
+        }
+    }
+    exec.total = mergeOutcomeSets(exec.sourceTotal, exec.transformedTotal);
+    return true;
 }
 
 } // namespace mlir_mracle

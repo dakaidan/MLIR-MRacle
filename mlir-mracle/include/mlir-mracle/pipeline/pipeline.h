@@ -41,8 +41,9 @@ PipelineResult runPipeline(const PipelineOptions &opts);
 // modules directly (no persistent cache, no source memo), runs the agitation
 // sweep through the harness, then replays rare states in rounds of --reruns
 // until they resolve or the total source runs across all binaries reach the
-// --max-runs cap. The verdict is the final post-replay comparison, judged on
-// merged data.
+// --max-runs cap, with a final TSan-instrumented triage when the cap is
+// reached unresolved. The verdict is the final post-replay comparison,
+// judged on merged data.
 RunInfo runSingle(const std::string &inputFile, int seed, int runIdx,
                   const PipelineOptions &opts);
 

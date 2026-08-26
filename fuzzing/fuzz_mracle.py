@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -12,17 +11,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BINARY_NAME = "mlir_mracle_opt"
 CACHE_DIR = PROJECT_ROOT / "cache"
-EXECUTABLE_CACHE_DIR = CACHE_DIR / "executables"
-
-# sanitizer stderr markers that indicate a bug in the tool or the JIT'd code
+# stderr markers that indicate a TSan report on the tool or the JIT'd code
 SANITIZER_PATTERNS = [
     r"WARNING: ThreadSanitizer",
-    r"WARNING: AddressSanitizer",
-    r"ERROR: AddressSanitizer",
-    r"ERROR: LeakSanitizer",
-    r"UndefinedBehaviorSanitizer",
-    r"runtime error:",
-    r"SUMMARY: (Thread|Address|UndefinedBehavior|Leak)Sanitizer",
+    r"SUMMARY: ThreadSanitizer",
 ]
 
 # returns the root of the mlir_wheel installation, or exits if not found
@@ -36,91 +28,33 @@ def mlir_wheel_root():
         sys.exit("mlir_wheel not installed; create the uv venv and run "
                  "`uv pip install -r requirements.txt` first")
 
-# returns the build directory for the given sanitizer configuration, or exits if not found
-def build_dir_for(sanitizers):
+# returns the build directory, or exits if not found
+def build_dir_for():
     env = os.environ.get("MLIR_MRACLE_BUILD_DIR")
     if env:
         return Path(env)
-    if sanitizers == "thread":
-        return PROJECT_ROOT / "build"
-    return PROJECT_ROOT / f"build-{sanitizer_build_suffix(sanitizers)}"
-
-# returns the suffix used for the build directory for the given sanitizer configuration
-def sanitizer_build_suffix(sanitizers):
-    if sanitizers == "thread":
-        return "tsan"
-    if "address" in sanitizers or "undefined" in sanitizers:
-        return "asan-ubsan"
-    return "none"
+    return PROJECT_ROOT / "build"
 
 
-def candidate_paths_for(sanitizers):
-    build_dir = build_dir_for(sanitizers)
-    return [
-        build_dir / "mlir-mracle" / "src" / "app" / BINARY_NAME,
-        build_dir / "bin" / BINARY_NAME,
-        build_dir / BINARY_NAME,
-        build_dir / "mlir-mracle" / BINARY_NAME,
-    ]
+# canonical location of the built tool; the runner builds it on first use
+def binary_path():
+    return build_dir_for() / "mlir-mracle" / "src" / "app" / BINARY_NAME
 
 
-def find_binary(sanitizers="thread"):
-    override = os.environ.get("MLIR_MRACLE_OPT")
-    if override:
-        return Path(override)
-    for path in candidate_paths_for(sanitizers):
-        if path.is_file() and os.access(path, os.X_OK):
-            return path
+def find_binary():
+    path = binary_path()
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
     return None
 
 
-# fingerprints the mlir_mracle source tree so cached executables are invalidated
-# when the tool itself changes
-def source_fingerprint():
-    hasher = hashlib.sha256()
-    for path in sorted((PROJECT_ROOT / "mlir-mracle").rglob("*")):
-        if not path.is_file():
-            continue
-        if "build" in path.parts or path.suffix in (".o", ".a", ".d"):
-            continue
-        hasher.update(path.relative_to(PROJECT_ROOT).as_posix().encode())
-        try:
-            hasher.update(path.read_bytes())
-        except OSError:
-            pass
-    for rel in ("CMakeLists.txt", "requirements.txt"):
-        path = PROJECT_ROOT / rel
-        if path.is_file():
-            hasher.update(rel.encode())
-            try:
-                hasher.update(path.read_bytes())
-            except OSError:
-                pass
-    return hasher.hexdigest()[:16]
-
-def cached_binary_path(opt_level, sanitizers):
-    h = hashlib.sha256()
-    h.update(str(opt_level).encode())
-    h.update(sanitizers.encode())
-    h.update(source_fingerprint().encode())
-    digest = h.hexdigest()[:16]
-    label = sanitizers.replace(",", "-") if sanitizers else "none"
-    return EXECUTABLE_CACHE_DIR / f"opt{opt_level}_{label}_{digest}" / BINARY_NAME
-
-def build_binary(opt_level=2, sanitizers="thread"):
+def build_binary():
     cmake = shutil.which("cmake")
     if not cmake:
         sys.exit("cmake not found in PATH")
-    cached = cached_binary_path(opt_level, sanitizers)
-    if cached.is_file() and os.access(cached, os.X_OK):
-        print(f"using cached {BINARY_NAME} (opt=-O{opt_level}, "
-              f"sanitizers={sanitizers or 'none'})", file=sys.stderr)
-        return cached
-    build_dir = build_dir_for(sanitizers)
+    build_dir = build_dir_for()
     config = [cmake, "-S", str(PROJECT_ROOT), "-B", str(build_dir),
-              f"-DCMAKE_PREFIX_PATH={mlir_wheel_root()}",
-              f"-DMLIR_MRACLE_OPT_LEVEL={opt_level}",
-              f"-DMLIR_MRACLE_SANITIZERS={sanitizers}"]
+              f"-DCMAKE_PREFIX_PATH={mlir_wheel_root()}"]
     if not (build_dir / "CMakeCache.txt").exists():
         config[1:1] = ["-G", "Ninja"]
     subprocess.run(config, check=True)
@@ -128,12 +62,10 @@ def build_binary(opt_level=2, sanitizers="thread"):
         [cmake, "--build", str(build_dir), "--target", BINARY_NAME, "-j"],
         check=True,
     )
-    binary = find_binary(sanitizers)
+    binary = find_binary()
     if not binary:
         sys.exit(f"build succeeded but {BINARY_NAME} not found")
-    cached.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(binary, cached)
-    return cached
+    return binary
 
 
 # returns the stderr lines that look like sanitizer reports
@@ -197,12 +129,6 @@ def main():
              "(default: generic only)"
     )
     parser.add_argument(
-        "--sanitizers", default="thread",
-        help="sanitizer build to use: 'thread' (default), 'address,undefined', "
-             "or 'none' (separate build dir per config; ASan and TSan are "
-             "never combined)"
-    )
-    parser.add_argument(
         "--campaign-dir", metavar="PATH",
         help="resume/continue a campaign, or set the output directory for --mode=emit"
     )
@@ -220,12 +146,6 @@ def main():
     parser.add_argument(
         "--max-runs", type=int, default=100000,
         help="hard cap for source runs per baseline (default 100000)"
-    )
-    parser.add_argument("--binary", metavar="PATH", help="override path to mlir_mracle_opt")
-    parser.add_argument(
-        "--no-cache", action="store_true",
-        help="disable the persistent on-disk cache (no state survives "
-             "between invocations)"
     )
     args = parser.parse_args()
 
@@ -253,19 +173,10 @@ def main():
     if "emit" in modes and not args.transform:
         sys.exit("--mode=emit requires --transform.")
 
-    sanitizers = ",".join(sorted(
-        s.strip() for s in args.sanitizers.lower().split(",") if s.strip()
-    ))
-    if sanitizers not in ("thread", "address,undefined", "none"):
-        sys.exit("--sanitizers must be one of: thread, address,undefined, none")
-    if "address" in sanitizers and "thread" in sanitizers:
-        sys.exit("ASan and TSan must not be combined in one build; "
-                 "run separate campaigns per sanitizer")
-
-    binary = Path(args.binary) if args.binary else find_binary(sanitizers)
+    binary = find_binary()
     if not binary:
         print(f"{BINARY_NAME} not found; building...", file=sys.stderr)
-        binary = build_binary(sanitizers=sanitizers)
+        binary = build_binary()
 
     cmd = [str(binary)]
     if args.seed is not None:
@@ -293,10 +204,9 @@ def main():
         cmd.append(args.file)
 
     # pin the cache root so every invocation shares the project baseline
-    # cache regardless of the working directory; --no-cache passes an empty
-    # value, which the tool treats as "no disk caching"
+    # cache regardless of the working directory
     env = dict(os.environ)
-    env["MLIR_MRACLE_CACHE_DIR"] = "" if args.no_cache else str(CACHE_DIR / "v2")
+    env["MLIR_MRACLE_CACHE_DIR"] = str(CACHE_DIR / "v2")
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sanitizer_hits = scan_sanitizer_output(result.stderr)
 

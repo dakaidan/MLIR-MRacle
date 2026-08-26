@@ -62,10 +62,14 @@ void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
 // replays rare states in rounds of --reruns extra source runs per binary
 // until the verdict resolves to ok/fail or the total source runs across all
 // binaries reach the --max-runs cap, then returns the final post-replay
-// comparison judged on merged data
+// comparison judged on merged data. When the cap is reached with rare states
+// still unresolved, a final TSan-instrumented triage merges scheduling-
+// perturbed runs into the totals before the final judgement.
 OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
                            const PipelineOptions &opts,
-                           OracleOptions oracleOpts) {
+                           OracleOptions oracleOpts,
+                           const llvm::Module &sourceModule,
+                           const llvm::Module &transformedModule) {
     OracleResult verdict = oracleCompare(exec, oracleOpts);
     int64_t binaryCount =
         std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
@@ -87,6 +91,13 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
                          configCount);
         verdict = oracleCompare(exec, oracleOpts);
     }
+    // the cap was reached with rare states still unresolved: TSan perturbs
+    // memory-access scheduling, so a final triage surfaces them or confirms
+    // them absent under instrumentation; a failed triage keeps the plain
+    // post-rerun verdict
+    if (verdict.needsRerun)
+        runTsanTriage(sourceModule, transformedModule, exec, opts.retestReps,
+                      static_cast<uint32_t>(seed) + 0x9e3779b9u, configCount);
     oracleOpts.postReruns = true;
     return oracleCompare(exec, oracleOpts);
 }
@@ -98,7 +109,8 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
 // modules directly (no persistent cache, no source memo), runs the agitation
 // sweep through the harness, then replays rare states in rounds of --reruns
 // until they resolve or the total source runs across all binaries reach the
-// --max-runs cap. The verdict is the final post-replay comparison, judged on
+// --max-runs cap, with a final TSan triage when the cap is reached
+// unresolved. The verdict is the final post-replay comparison, judged on
 // merged data.
 RunInfo runSingle(const std::string &inputFile, int seed,
                   int runIdx, const PipelineOptions &opts) {
@@ -162,7 +174,8 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     oracleOpts.thresholdPct = opts.thresholdPct;
 
     OracleResult verdict = runReplayLoop(exec, seed, execOpts.configCount,
-                                         opts, oracleOpts);
+                                         opts, oracleOpts,
+                                         *sourceLLVM, *transformedLLVM);
     populateRunInfoFromExecution(setup.runInfo, exec);
 
     setup.runInfo.issues = verdict.compare.issues;

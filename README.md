@@ -1,6 +1,6 @@
 # MLIR-MRacle
 
-A metamorphic testing approach for OpenMP concurrency programs in MLIR.
+A metamorphic testing harness for OpenMP concurrency programs in MLIR.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/language-C%2B%2B23-informational.svg)]()
@@ -8,102 +8,52 @@ A metamorphic testing approach for OpenMP concurrency programs in MLIR.
 
 ## Overview
 
-Given a concurrent MLIR program, the harness:
+MLIR-MRacle is a metamorphic testing tool for OpenMP MLIR programs. It applies
+memory model-related metamorphic relations (MRs) to transform a program, runs
+both the original and the transformed versions on LLJIT, and compares their
+outcome sets. Drastic changes in results across the source and transformed programs point to a bug in OpenMP lowering.
 
-1. parses and clones the module, applying one or more seeded,
-   semantics-preserving transformations to the clone;
-2. inserts symmetric jitter into both source and transformed MLIR so rare
-   interleavings surface;
-3. lowers all modules to LLVM IR;
-4. agitates each cloned LLVM module for finding rare interleavings;
-5. executes every variant + a single-thread determinism run;
-6. compares outcome set and returns results.
+This project investigates a metamorphic-testing approach for concurrency and
+memory models, developed during an MLSystems research internship. Conventional
+testing assumes single-thread execution and falls short on reproducibility
+because of nondeterminism and varying memory models across hardware.
+Metamorphic relations sidestep these problems, alongside the oracle problem, enabling MLIR-MRacle to be (afaik) the first MLIR fuzzer that can generate valid concurrent programs for testing, with respect to concurrency constructs and the native memory model.
+
+## Pipeline
 
 ```mermaid
 flowchart LR
-    A[MLIR module] --> B[Clone]
-    B --> C[Apply metamorphic transforms to clone]
-    A --> D[Jitter both sides symmetrically]
-    C --> D
-    D --> E[Lower both to LLVM IR]
-    E --> F[Agitation]
-    F --> G[JIT-compile variants]
-    G --> H[Execute variants]
-    H --> I[Collect outcome sets]
-    I --> J[Oracle comparison]
-    J --> K{Relation holds?}
-    K -->|rare state| L[Replay round]
-    L --> J
-    K -->|final| M[OK / WARN / FAIL]
+    A[Parse MLIR and clone] --> B[Apply metamorphic transforms]
+    B --> C[Lower to LLVM IR]
+    C --> D[Agitate clones]
+    D --> E[Execute on LLJIT]
+    E --> F[Compare outcome sets]
 ```
 
-## Context
-
-Developed during an MLSystems research internship, this project investigates a
-metamorphic-testing approach for concurrency and memory models. Conventional
-testing assumes single-thread execution and falls short on reproducibility because of nondeterminism and varying memory models across hardware. Additionally, the oracle problem continues to haunt software testing generally, and even moreso for nondeterministic, multi-output testing.
-
-By using a metamorphic-testing approach, we can solve these issues. Naturally, metamorphic transformations sidestep the oracle problem, while specifying transformations that are safe for concurrent programs and memory model of the user's device. Unlike other MLIR testing tools, this allows MLIR-MRacle to test OpenMP concurrent programs in a behaviour-preserving way with respect to the notion of concurrency and the user's hardware memory model.
+1. Parse the input module and clone it.
+2. Apply one or more seeded, semantics-preserving transforms from the
+   registry to the clone.
+3. Lower both modules to LLVM IR.
+4. Agitate clones and execute both sides on LLJIT.
+5. Compare the observed outcome sets.
 
 ## Features
 
-- 20+ seeded metamorphic transformations across memory-model and OpenMP
-  constructs (see [Transforms](#transforms)).
-- Three comparison relations — equality, subset, superset — with Poisson
-  significance tests, single-thread determinism checks, and replay rounds for
-  rare outcomes.
-- Agitation sweep across JIT optimisation levels, basic-block layouts, and
-  OpenMP team sizes.
-- ThreadSanitizer support: the tool builds with TSan by default, the runner
-  scans stderr for sanitizer reports, and the legacy pipeline can instrument
-  JIT'd code with TSan via `--tsan`.
-- Persistent disk cache keyed by module hash, so repeated campaigns skip
-  lowering and translation.
-- Per-run artifacts (`source.mlir`, `transformed.mlir`, `.ll`, `.bc`,
-  `run_info.json`) published as a campaign completes.
+- 20+ seeded metamorphic transformations (see [Transforms](#transforms)).
+- An outcome oracle over three comparison relations — equality, subset,
+  superset — with Poisson significance tests, single-thread determinism
+  checks, and the possibility for replay rounds when results are inconclusive.
+- Agitation; random jitter insertion (via `scf.while`), differing JIT optimisation level and OpenMP team sizes and shuffling basic-block layouts.
+- Outputs go to a campaign directory: `run_info.json` JSON report collects a general report for the entire campaign and is the main source of information. Each individual run is sorted by its outcome category (`campaign/(OK|WARN|FAIL`) alongside MLIR and LLVM artifacts for further investigation.
 - Python runner and a litmus-style seed corpus.
 
-## Repository layout
+## Quick start
 
-```text
-mlir-mracle/
-└── src/
-    ├── app/              # mlir_mracle_opt CLI driver
-    └── lib/
-        ├── agitation/    # agitates compiled variants across codegen and runtime parameters
-        ├── backend/
-        │   ├── jit/      # JIT-compiles LLVM modules for execution
-        │   └── lowering/ # lowers MLIR to LLVM IR
-        ├── context/      # shared data structures and outcome-set types
-        ├── execution/    # runs compiled binaries and collects observed outcomes
-        ├── io/           # serializes results and dumps IR artifacts
-        ├── legacy/       # legacy thread-group oracle pipeline (--legacy)
-        ├── oracle/       # compares outcome sets and derives verdicts
-        ├── pipeline/     # pipeline orchestration, emit and execution modes
-        └── passes/       # metamorphic transformation passes
-fuzzing/
-├── fuzz_mracle.py        # campaign runner
-└── corpus/
-    └── seeds/            # litmus-style MLIR seed programs
-```
-
-## Prerequisites
+### Prerequisites
 
 - Docker, or natively: `uv` (provides Python 3.12, CMake, and Ninja), a C++23
   compiler, and OpenMP (Homebrew `libomp` on Apple Silicon is auto-detected).
-- LLVM/MLIR come from the `mlir-wheel` package pinned in `requirements.txt`
-  (the latest published snapshot on the `llvm.github.io/eudsl` index); no
-  vendored LLVM build is needed.
-
-## Getting started
-
-### Docker
-
-```bash
-git clone https://github.com/dakaidan/MLIR-MRacle.git
-docker build -t mlir-metamorphic-testing .
-docker run -it --rm mlir-metamorphic-testing /bin/bash
-```
+- LLVM/MLIR come from the `mlir-wheel` package pinned in `requirements.txt`.
 
 ### Native build
 
@@ -118,80 +68,100 @@ uv pip install -r requirements.txt
 .venv/bin/cmake --build build --target mlir_mracle_opt -j
 ```
 
-Build knobs:
+> [!TIP]
+> The Python runner builds `mlir_mracle_opt` for you on first use, so the
+> native build is optional for normal use.
 
-- `MLIR_MRACLE_SANITIZERS` — comma-separated sanitizers for all `mlir_mracle`
-  targets (default `thread`; empty disables). ASan and TSan must never be
-  combined in one build.
-- `MLIR_MRACLE_OPT_LEVEL` — optimisation level for the tool itself (default
-  `2`).
+### Docker
 
-## Usage
-
-```
-mlir_mracle_opt [options] <path-to-mlir-file>
+```bash
+git clone https://github.com/dakaidan/MLIR-MRacle.git
+docker build -t mlir-mracle .
+docker run -it --rm mlir-mracle /bin/bash
 ```
 
-The binary prints the campaign directory on stdout.
+## Run a campaign
 
-| Option | Meaning |
-| --- | --- |
-| `--seed=N` | RNG seed for transform selection and jitter (random per campaign when omitted) |
-| `--iter=N` | runs per variant |
-| `--reps=N` | source-side repetitions / retest budget |
-| `--transform=NAME[,NAME...]` | restrict the transform set |
-| `--apply=N` | max transform applications per function |
-| `--tsan=PERCENT` | legacy pipeline only: percent of runs whose JIT'd binaries are TSan-instrumented |
-| `--multi=FOLDER` | pick a random `.mlir` file from a folder per run |
-| `--campaign-dir=PATH` | output location |
-| `--threshold=PCT` | novelty threshold, 0–100 |
-| `--reruns=N` | replay-round budget |
-| `--max-runs=N` | hard cap for source runs per baseline |
-| `--run` | execution mode: no oracle comparison, `.ll` artifacts only |
-| `--legacy` | legacy (thread-group) oracle pipeline |
-| `--new-oracle` | default agitation-sweep pipeline (explicit selector) |
-| `--emit-mlir` | emit transformed modules only; requires `--transform` |
+### Python runner (recommended)
+
+```bash
+.venv/bin/python fuzzing/fuzz_mracle.py fuzzing/corpus/seeds
+```
 
 Examples:
 
 ```bash
-# default agitation-sweep campaign on one file
-path/to/mlir_mracle_opt --iter=1000 --reps=100 fuzzing/corpus/seeds/iriw.mlir
+# single litmus test
+.venv/bin/python fuzzing/fuzz_mracle.py fuzzing/corpus/seeds/iriw.mlir
 
-# transform randomly picked files from a corpus folder
-path/to/mlir_mracle_opt --iter=1000 --multi fuzzing/corpus/seeds
+# fixed seed, one random file from the corpus per run
+.venv/bin/python fuzzing/fuzz_mracle.py --seed=7 --multi fuzzing/corpus/seeds
 
-# restrict to fence-insertion transforms, fixed seed
-path/to/mlir_mracle_opt --seed=7 --transform=insert-fence,remove-fence test.mlir
+# restrict to fence transforms
+.venv/bin/python fuzzing/fuzz_mracle.py --transform=insert-fence,remove-fence fuzzing/corpus/seeds/iriw.mlir
 
-# straight execution, no oracle
-path/to/mlir_mracle_opt --run test.mlir
+# add ARMv8-specific commutations
+.venv/bin/python fuzzing/fuzz_mracle.py --model=armv8 fuzzing/corpus/seeds/iriw.mlir
+
+# emit transformed MLIR only
+.venv/bin/python fuzzing/fuzz_mracle.py --mode=emit --transform=insert-fence fuzzing/corpus/seeds/iriw.mlir
 ```
 
-### Fuzzer runner
+Key options:
+
+| Option | Meaning |
+| --- | --- |
+| `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `multi` (default `multi`) |
+| `--model` | memory model gate: empty = generic transforms only, `armv8` adds ARMv8-specific ones |
+| `--reps` | executions per program per thread count (default 5000) |
+| `--iter` | number of pipeline repetitions (default 1) |
+| `--transform` | restrict the transform set (repeat or comma-separate) |
+| `--apply` | max transform applications per run |
+| `--multi` | pick a random `.mlir` file from a folder per run |
+| `--seed` | fixed RNG seed |
+| `--campaign-dir` | resume/continue a campaign, or the emit-mode output directory |
+| `--threshold` | novelty threshold, 0–100 (default 5) |
+| `--reruns` | replay-round budget (default 5000) |
+| `--max-runs` | hard cap for source runs per baseline (default 100000) |
+| `--no-cache` | disable the persistent on-disk cache |
+See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
+Environment: `MLIR_MRACLE_BUILD_DIR` the build directory, and
+`MLIR_MRACLE_CACHE_DIR` the artifact cache (an empty value disables caching).
+
+### Using the binary directly
 
 ```bash
-.venv/bin/python fuzzing/fuzz_mracle.py [options] <file-or-directory>
+.venv/bin/cmake --build build --target mlir_mracle_opt -j
+build/mlir-mracle/src/app/mlir_mracle_opt [options] <path-to-mlir-file>
 ```
 
-The runner builds a thread-sanitized `mlir_mracle_opt` on first use (caching
-executables by source fingerprint), runs a campaign, and scans stderr for
-TSan/ASan/UBSan reports. On sanitizer hits it writes `sanitizer.log` and
-classifies the campaign `ERROR`. See
-`.venv/bin/python fuzzing/fuzz_mracle.py --help`.
+The binary prints the campaign directory on stdout and accepts the same
+`--mode`, `--model`, `--seed`, `--iter`, `--reps`, `--transform`, `--apply`,
+`--multi`, `--campaign-dir`, `--threshold`, `--reruns`, and `--max-runs`
+options, plus the `--run`, `--legacy`, `--new-oracle`, and `--emit-mlir`
+aliases.
 
-Environment: `MLIR_MRACLE_OPT` overrides the binary path, `MLIR_MRACLE_BUILD_DIR`
-the build directory, and `MLIR_MRACLE_CACHE_DIR` the artifact cache (an empty
-value disables caching).
+## Modes
+
+| Mode | What it does |
+| --- | --- |
+| `multi` (default) | compare source vs transformed under the agitation sweep and oracle |
+| `execution` | execute each file as-is; no oracle comparison, `.ll` artifacts only |
+| `emit` | apply transforms and emit the transformed MLIR only; requires `--transform` |
+| `legacy` | legacy thread-group oracle pipeline |
 
 ## Transforms
 
 Each transform declares the outcome-set relation it preserves; a run compares
 in the direction given by the composition of the transforms actually applied.
+Transforms also declare a memory-model target, and the set of applicable
+transforms is resolved from the requested model (`--model`): `generic`
+transforms are always included, and a non-empty model adds the transforms
+targeting that model.
 
 ### Generic concurrency transforms
 
-Safe for any memory model.
+Always available under every memory model.
 
 | Transform | Effect | Relation |
 | --- | --- | --- |
@@ -216,11 +186,14 @@ Safe for any memory model.
 | `restrict-operation` | strengthen atomic memory order one stage | subset |
 | `unroll-single-thread` | unroll a single-section `omp.parallel` | equality |
 
-### ARMv8
+### Memory-model-specific transforms
 
-Three transforms are ARMv8-specific with behaviour changing on either stronger or weaker memory models. They are marked `ARMv8 Safe` in `MetamorphicPass.cpp`:
-- `commute-relaxed-read-write` — not possible on stronger memory models
-- `commute-relaxed-write-write` — as above
+Transforms for a specific memory model live under
+`mlir-mracle/src/lib/passes/transforms/<model>/` — e.g. the ARMv8 relaxed
+commutations in `arm/ArmTransforms.cpp`. Each declares its target via
+`getTarget()` (`MetamorphicTransform.h`), and `getTransforms()` in
+`MetamorphicTransform.cpp` adds it to the applicable set only when the
+requested `--model` matches.
 
 ## Agitation sweep
 
@@ -235,8 +208,12 @@ variants and run under `configCount` (default 5) OpenMP team-size configs.
   replacement.
 - **Replay rounds** — rare states re-run with fresh team-size mixes, without
   recompiling.
+- **TSan triage** — when the `--max-runs` cap is reached with rare states
+  still unresolved, one TSan-instrumented binary per side runs a final
+  `--reruns` round; TSan's scheduling perturbation either surfaces the state
+  or confirms it absent before the final verdict.
 
-## How results are judged
+## Oracle
 
 - A single-thread probe of both sides must produce the same deterministic
   outcome, or the run fails.
@@ -249,6 +226,36 @@ variants and run under `configCount` (default 5) OpenMP team-size configs.
 - Verdicts are `OK`, `WARN` (statistical deviation below the fail bar), or
   `FAIL` (hard behavioural change).
 
+## Repository layout
+
+```text
+.
+├── mlir-mracle/
+│   ├── include/mlir-mracle/   # public headers
+│   └── src/
+│       ├── app/               # mlir_mracle_opt CLI driver
+│       └── lib/
+│           ├── agitation/     # agitates compiled variants across codegen and runtime parameters
+│           ├── backend/
+│           │   ├── jit/       # JIT-compiles LLVM modules for execution
+│           │   └── lowering/  # lowers MLIR to LLVM IR
+│           ├── context/       # shared data structures and outcome-set types
+│           ├── execution/     # runs compiled binaries and collects observed outcomes
+│           ├── io/            # serializes results and dumps IR artifacts
+│           ├── legacy/        # legacy thread-group oracle pipeline (--legacy)
+│           ├── oracle/        # compares outcome sets and derives verdicts
+│           ├── pipeline/      # pipeline orchestration, emit and execution modes
+│           └── passes/        # metamorphic transformation passes
+├── fuzzing/
+│   ├── fuzz_mracle.py         # primary campaign runner
+│   └── corpus/
+│       └── seeds/             # litmus-style MLIR seed programs
+├── debug-progs/               # small MLIR programs for manual debugging
+├── CMakeLists.txt
+├── Dockerfile
+└── requirements.txt
+```
+
 ## Output layout
 
 A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
@@ -260,13 +267,14 @@ A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
   and `reason`)
 
 `<campaign-dir>/result.json` aggregates the per-binary results, and
-`sanitizer.log` records any sanitizer reports. `--run` mode writes a bare
-`source.ll` per run; `--emit-mlir` writes `run<N>_seed<S>.mlir` variants.
+`sanitizer.log` records any TSan reports. `--mode=execution` writes
+a bare `source.ll` per run; `--mode=emit` writes `run<N>_seed<S>.mlir`
+variants.
 
 ## Testing
 
 ```bash
-cmake --build build --target mlir_mracle_oracle_test mlir_mracle_legacy_oracle_test -j
+.venv/bin/cmake --build build --target mlir_mracle_oracle_test mlir_mracle_legacy_oracle_test -j
 ctest --test-dir build --output-on-failure
 ```
 
@@ -275,14 +283,18 @@ configuration success.
 
 ## Troubleshooting
 
-- **TSan at runtime**: the tool must be built with TSan so JIT'd TSan
-  instrumentation can resolve the runtime; the default
-  `MLIR_MRACLE_SANITIZERS=thread` build does this. The default
-  pipeline does not instrument JIT'd code; use `--legacy --tsan=100` for
-  TSan-instrumented runs.
-- **ASan + TSan**: never combine in one build; set `MLIR_MRACLE_SANITIZERS=""`
-  to disable sanitizers.
 - **Apple Silicon OpenMP**: Homebrew `libomp` is auto-detected; ensure it is
   installed before configuring.
-- **Repeated re-lowering**: delete the cache dir (`cache/`) to force fresh
+- **Repeated re-lowering**: delete the cache dir (`cache/v2`) to force fresh
   lowering of all modules.
+- **ThreadSanitizer**: the tool and JIT'd code always run under TSan
+  (`-fsanitize=thread`); `sanitizer.log` records TSan reports from the
+  campaign run.
+
+## Pull requests
+
+This is a research codebase, so PRs do not need to be polished. Open an issue
+or draft PR early and keep the change small. Metamorphic transformations for
+other hardware targets or memory models are especially appreciated.
+
+Have questions, found a bug, or want to try metamorphic testing for a new memory model? Email me directly at **aarongaba05@gmail.com**.

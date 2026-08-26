@@ -1,21 +1,13 @@
 enable_language(CXX)
 
-# Sanitizer and optimisation configuration for all mlir_mracle targets. The
-# default (TSan at -O2) keeps race detection for JIT'd programs while keeping
-# the tool itself fast; TSan is already applied explicitly to JIT'd code.
-# "address,undefined" builds an ASan+UBSan tool that catches parser/lowering/
-# JIT memory and UB bugs. ASan and TSan must never be combined in one build;
-# an empty value disables sanitizers entirely.
-set(MLIR_MRACLE_SANITIZERS "thread" CACHE STRING
-    "Sanitizers for mlir_mracle targets (comma-separated; empty disables)")
+# Optimisation level for all mlir_mracle targets. ThreadSanitizer is the only
+# sanitizer: the JIT instruments JIT'd code with TSan and needs the runtime
+# linked into the host binary at startup, so the tool is always built with
+# -fsanitize=thread.
 set(MLIR_MRACLE_OPT_LEVEL "2" CACHE STRING
     "Optimisation level for mlir_mracle targets")
-if(NOT MLIR_MRACLE_SANITIZERS STREQUAL "")
-    add_compile_options(-fsanitize=${MLIR_MRACLE_SANITIZERS} -O${MLIR_MRACLE_OPT_LEVEL})
-    add_link_options(-fsanitize=${MLIR_MRACLE_SANITIZERS})
-else()
-    add_compile_options(-O${MLIR_MRACLE_OPT_LEVEL})
-endif()
+add_compile_options(-fsanitize=thread -O${MLIR_MRACLE_OPT_LEVEL})
+add_link_options(-fsanitize=thread)
 
 # Apple clang does not auto-detect Homebrew's libomp; hint FindOpenMP when
 # present. Done here so both the oracle library and the app resolve the same

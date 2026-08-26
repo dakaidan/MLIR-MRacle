@@ -98,6 +98,19 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
 void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
                       uint32_t roundSeed, int configCount = 5);
 
+// Final triage once the plain rerun loop has exhausted its max-runs budget
+// with rare states still unresolved: compiles one TSan-instrumented binary
+// per side (TSan perturbs memory-access scheduling, so unresolved states
+// either surface under instrumentation or are confirmed absent) and merges
+// its observed outcomes into exec's aggregate totals and per-binary lists.
+// extraRuns are spread across fresh agitation configs drawn from triageSeed.
+// Returns false and sets error when the TSan runtime is unavailable; the
+// caller then keeps the plain post-rerun verdict.
+bool runTsanTriage(const llvm::Module &sourceModule,
+                   const llvm::Module &transformedModule,
+                   ExecutionResult &exec, int extraRuns, uint32_t triageSeed,
+                   int configCount = 5, std::string *error = nullptr);
+
 // Pointers to every compiled binary (source then transformed), in binary
 // index order.
 std::vector<const CompiledBinary *>
