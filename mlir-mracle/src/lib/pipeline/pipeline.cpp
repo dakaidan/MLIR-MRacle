@@ -12,6 +12,77 @@
 #include <vector>
 
 namespace mlir_mracle {
+namespace {
+
+// converts one per-binary execution result plus its compiled binary into the
+// concise breakdown appended to run_info.json
+BinaryOutcomeResult toBinaryOutcomeResult(const BinaryExecutionResult &br,
+                                          const CompiledBinary &bin) {
+    BinaryOutcomeResult bo;
+    bo.side = br.side;
+    bo.compileIndex = bin.compileIndex;
+    bo.jitOptLevel = bin.jitOptLevel;
+    bo.runs = static_cast<int>(br.threadedTotal.totalRuns);
+    bo.outcomes = br.threadedTotal.outcomes;
+    bo.counts = br.threadedTotal.counts;
+    return bo;
+}
+
+// fills the run-level union outcome sets and the per-binary breakdown from
+// the finished execution; the verdict data lives in these sets, so no single
+// team size is reported
+void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
+    info.sourceRuns = exec.sourceTotal.totalRuns;
+    info.transformedRuns = exec.transformedTotal.totalRuns;
+    info.sourceOutcomes = std::move(exec.sourceTotal.outcomes);
+    info.sourceCounts = std::move(exec.sourceTotal.counts);
+    info.transformedOutcomes = std::move(exec.transformedTotal.outcomes);
+    info.transformedCounts = std::move(exec.transformedTotal.counts);
+
+    int srcCount = static_cast<int>(exec.sourceBinaries.size());
+    for (size_t i = 0; i < exec.binaryResults.size(); ++i) {
+        const auto &br = exec.binaryResults[i];
+        const CompiledBinary &bin =
+            static_cast<int>(i) < srcCount
+                ? exec.sourceBinaries[i]
+                : exec.transformedBinaries[i - srcCount];
+        info.binaryOutcomes.push_back(toBinaryOutcomeResult(br, bin));
+    }
+}
+
+// replays rare states in rounds of --reruns extra source runs per binary
+// until the verdict resolves to ok/fail or the total source runs across all
+// binaries reach the --max-runs cap, then returns the final post-replay
+// comparison judged on merged data
+OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
+                           const PipelineOptions &opts,
+                           OracleOptions oracleOpts) {
+    OracleResult verdict = oracleCompare(exec, oracleOpts);
+    int64_t binaryCount =
+        std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
+    int replayRound = 0;
+    while ((verdict.needsRerun || verdict.compare.warn) &&
+           exec.sourceTotal.totalRuns < opts.maxSourceReps) {
+        int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
+        int extra = static_cast<int>(std::min<int64_t>(
+            opts.retestReps, budget / binaryCount));
+        if (extra <= 0)
+            break;
+        // each round re-agitates with a seed derived directly from the run
+        // seed (round 1 -> seed+1, ...), so the replay sequence is
+        // reproducible from --seed alone and every round draws a fresh
+        // team-size mix
+        rerunAllBinaries(exec, extra,
+                         static_cast<uint32_t>(seed) +
+                             static_cast<uint32_t>(++replayRound),
+                         configCount);
+        verdict = oracleCompare(exec, oracleOpts);
+    }
+    oracleOpts.postReruns = true;
+    return oracleCompare(exec, oracleOpts);
+}
+
+} // namespace
 
 // default pipeline single run: applies the requested transforms, adds
 // symmetric jitter delay chains to both modules, lowers and translates both
@@ -73,65 +144,9 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     oracleOpts.relation = setup.runInfo.relation;
     oracleOpts.thresholdPct = opts.thresholdPct;
 
-    // --max-runs caps the total source executions across all agitation
-    // binaries; the replay budget is what remains of the cap after the
-    // initial sweep. rerunAllBinaries adds `extra` runs per binary, so each
-    // replay round spends binaryCount * extra source executions. An ok
-    // verdict stops immediately; a warn or a pending rare-state rerun keeps
-    // replaying (re-checking on merged data) until it resolves to ok/fail or
-    // the cap is reached; a fail never replays.
-    int64_t binaryCount =
-        std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
-    OracleResult verdict = oracleCompare(exec, oracleOpts);
-    int replayRound = 0;
-    while ((verdict.needsRerun || verdict.compare.warn) &&
-           exec.sourceTotal.totalRuns < opts.maxSourceReps) {
-        int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
-        int extra = static_cast<int>(std::min<int64_t>(
-            opts.retestReps, budget / binaryCount));
-        if (extra <= 0)
-            break;
-        // each round re-agitates with its own seed derived directly from the
-        // run seed (round 1 -> seed+1, round 2 -> seed+2, ...), so the whole
-        // replay sequence is reproducible from --seed alone and every round
-        // draws a fresh team-size mix
-        rerunAllBinaries(exec, extra,
-                         static_cast<uint32_t>(seed) +
-                             static_cast<uint32_t>(++replayRound),
-                         execOpts.configCount);
-        verdict = oracleCompare(exec, oracleOpts);
-    }
-    oracleOpts.postReruns = true;
-    verdict = oracleCompare(exec, oracleOpts);
-
-    // (thread counts, opt levels, code layout), so no single team size
-    // is reported; the run-level union sets carry the verdict data and a
-    // concise per-binary breakdown sits alongside
-    setup.runInfo.sourceRuns = exec.sourceTotal.totalRuns;
-    setup.runInfo.transformedRuns = exec.transformedTotal.totalRuns;
-    setup.runInfo.sourceOutcomes = std::move(exec.sourceTotal.outcomes);
-    setup.runInfo.sourceCounts = std::move(exec.sourceTotal.counts);
-    setup.runInfo.transformedOutcomes =
-        std::move(exec.transformedTotal.outcomes);
-    setup.runInfo.transformedCounts =
-        std::move(exec.transformedTotal.counts);
-
-    int srcCount = static_cast<int>(exec.sourceBinaries.size());
-    for (size_t i = 0; i < exec.binaryResults.size(); ++i) {
-        const auto &br = exec.binaryResults[i];
-        const CompiledBinary *bin =
-            static_cast<int>(i) < srcCount
-                ? &exec.sourceBinaries[i]
-                : &exec.transformedBinaries[i - srcCount];
-        BinaryOutcomeResult bo;
-        bo.side = br.side;
-        bo.compileIndex = bin->compileIndex;
-        bo.jitOptLevel = bin->jitOptLevel;
-        bo.runs = static_cast<int>(br.threadedTotal.totalRuns);
-        bo.outcomes = br.threadedTotal.outcomes;
-        bo.counts = br.threadedTotal.counts;
-        setup.runInfo.binaryOutcomes.push_back(std::move(bo));
-    }
+    OracleResult verdict = runReplayLoop(exec, seed, execOpts.configCount,
+                                         opts, oracleOpts);
+    populateRunInfoFromExecution(setup.runInfo, exec);
 
     if (!verdict.compare.ok)
         setup.runInfo.error = verdict.compare.message;
