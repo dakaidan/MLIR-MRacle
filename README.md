@@ -307,8 +307,7 @@ ctest --test-dir build --output-on-failure
 
 ## Pull requests
 
-This is a research codebase, so PRs do not need to be polished. Open an issue
-or draft PR early and keep the change small. Metamorphic transformations for
+This is an emerging codebase, so PRs do not need to be polished. Metamorphic transformations for
 other hardware targets or memory models are especially appreciated.
 
-Have questions, found a bug, or want to try metamorphic testing for a new memory model? Email me directly at **aarongaba05@gmail.com**.
+Contact me at **aarongaba05@gmail.com** if you have any questions.
