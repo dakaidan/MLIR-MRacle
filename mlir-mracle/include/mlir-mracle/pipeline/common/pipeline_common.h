@@ -22,9 +22,9 @@ inline constexpr int kDeterminismReps = 32;
 // probe, 4/8 the wider concurrency sweep.
 inline constexpr int kThreadCounts[] = {2, 1, 4, 8};
 
-// the legacy --tsan pipeline and execution mode keep the JIT's default
-// CodeGen opt level; the default agitation sweep randomises opt levels per
-// compiled binary instead
+// the legacy pipeline and execution mode keep the JIT's default CodeGen
+// opt level; the default agitation sweep randomises opt levels per compiled
+// binary instead
 inline constexpr int kLegacyJitOptLevel = -1;
 
 // per-campaign log folder; runs are written into it as they complete
@@ -46,9 +46,8 @@ std::string pickInputFile(const PipelineOptions &opts,
                           const std::vector<std::string> &multiFiles,
                           int runIdx, int runSeed);
 
-// per-run seed: fixed when --seed is given, otherwise derived
-// deterministically from the run index so a campaign is reproducible
-// without a fixed seed and never draws fresh entropy
+// per-run seed: fixed when --seed is given, otherwise a process-wide random
+// base mixed with the run index
 int runSeedFor(const PipelineOptions &opts, int runIdx);
 
 // parses a source file, capturing diagnostics in error

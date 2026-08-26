@@ -12,7 +12,7 @@ namespace mlir_mracle {
 struct PipelineOptions {
     std::string inputFile;
     std::string multiFolder;
-    int seed = -1; // -1 = deterministic per-run seed derived from run index, >=0 = fixed
+    int seed = -1; // -1 = random base seed drawn per process, mixed with the run index; >=0 = fixed
     int runNumber = 0;        // first run index
     int numRuns = 1;          // pipeline repetitions, set by --iter
     int reps = 5000;           // --reps: executions per program per thread count

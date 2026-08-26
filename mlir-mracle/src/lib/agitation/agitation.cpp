@@ -92,7 +92,7 @@ std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
 
         std::string err;
         auto fn = compileLLVMModuleToFunction(std::move(clone), &err,
-                                              opts.enableTsan, optLevel,
+                                              /*enableTsan=*/false, optLevel,
                                               bbSections);
         if (!fn) {
             if (error)

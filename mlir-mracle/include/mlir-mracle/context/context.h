@@ -27,11 +27,32 @@ struct AppliedTransformation {
     std::string targetFunction;
 };
 
+// Severity of a structured verdict issue: FAIL drives the overall ERROR
+// status, WARN drives WARN; OK runs carry no issues.
+enum class IssueSeverity { Fail, Warn };
+
+std::string issueSeverityToString(IssueSeverity severity);
+
+// one structured deviation reported by the oracle, replacing the free-form
+// message: reason is the deviation category (e.g. "missing outcome"),
+// outcome is the affected joint outcome/value when one exists, and severity
+// classifies it
+struct VerdictIssue {
+    IssueSeverity severity = IssueSeverity::Warn;
+    std::string outcome; // e.g. "[2]" or "var0=3"; empty when not applicable
+    std::string reason;
+};
+
 // Result of a comparison between two outcome sets.
 struct CompareResult {
     bool ok = true;
     bool warn = false;
-    std::string message;
+    std::string message; // joined reasons, kept for legacy/internal tests
+    std::vector<VerdictIssue> issues; // structured deviations, FAIL first
+
+    CompareResult() = default;
+    CompareResult(bool ok, bool warn, std::string message)
+        : ok(ok), warn(warn), message(std::move(message)) {}
 };
 
 // one ordered tuple of outputs produced by a single execution
@@ -59,6 +80,7 @@ struct ThreadGroupResult {
     int numThreads;
     std::string status = "OK"; // "OK" | "WARN" | "ERROR"
     std::string message;       // short category, not serialized to JSON
+    std::vector<VerdictIssue> issues; // structured deviations, FAIL first
     int originalRuns = 0;      // executions of the source program in this group
     int transformedRuns = 0;   // executions of the transformed program in this group
     OutcomeSetResult outcomeSet;
@@ -98,6 +120,9 @@ struct RunInfo {
     OutcomeRelation relation = OutcomeRelation::Equality;
     std::string error;
     std::string warn;
+    // structured deviations behind the status; the default pipeline copies
+    // the oracle's issues here, legacy runs fall back to thread results
+    std::vector<VerdictIssue> issues;
     // artifacts captured during the run; saved under results/<status>/ for
     // every run
     std::string sourceMLIR;

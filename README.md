@@ -1,6 +1,6 @@
 # MLIR-MRacle
 
-A metamorphic testing approach for OpenMP concurrency programs
+A metamorphic testing approach for OpenMP concurrency programs in MLIR.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/language-C%2B%2B23-informational.svg)]()
@@ -136,7 +136,7 @@ The binary prints the campaign directory on stdout.
 
 | Option | Meaning |
 | --- | --- |
-| `--seed=N` | RNG seed for transform selection and jitter |
+| `--seed=N` | RNG seed for transform selection and jitter (random per campaign when omitted) |
 | `--iter=N` | runs per variant |
 | `--reps=N` | source-side repetitions / retest budget |
 | `--transform=NAME[,NAME...]` | restrict the transform set |
@@ -256,7 +256,8 @@ A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
 - `source.mlir`, `transformed.mlir`, `lowered.mlir`
 - `source.ll`, `transformed.ll`
 - `run_info.json` — transform applications, per-thread/outcome-set breakdown,
-  verdict
+  verdict, and structured `issues` (each with `status` FAIL/WARN, `outcome`,
+  and `reason`)
 
 `<campaign-dir>/result.json` aggregates the per-binary results, and
 `sanitizer.log` records any sanitizer reports. `--run` mode writes a bare

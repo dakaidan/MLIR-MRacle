@@ -24,6 +24,16 @@ std::string outcomeRelationToString(OutcomeRelation relation) {
     llvm_unreachable("unknown outcome relation");
 }
 
+std::string issueSeverityToString(IssueSeverity severity) {
+    switch (severity) {
+    case IssueSeverity::Fail:
+        return "FAIL";
+    case IssueSeverity::Warn:
+        return "WARN";
+    }
+    llvm_unreachable("unknown issue severity");
+}
+
 bool outcomeRelationFromString(const std::string &s,
                                OutcomeRelation &relation) {
     if (s == "equality") {

@@ -77,14 +77,17 @@ std::string pickInputFile(const PipelineOptions &opts,
     return multiFiles[dist(fileRng)];
 }
 
-// per-run seed: fixed when --seed is given, otherwise derived
-// deterministically from the run index so a campaign is reproducible
-// without a fixed seed and never draws fresh entropy
+// per-run seed: fixed when --seed is given, otherwise a process-wide random
+// base mixed with the run index, so every campaign draws fresh entropy while
+// runs within one campaign stay distinct and reproducible from the base
 int runSeedFor(const PipelineOptions &opts, int runIdx) {
     if (opts.seed >= 0)
         return opts.seed;
-    uint32_t h = 0x9e3779b9u +
-                 static_cast<uint32_t>(runIdx) * 2654435761u;
+    static const uint32_t base = [] {
+        std::random_device rd;
+        return rd();
+    }();
+    uint32_t h = base + static_cast<uint32_t>(runIdx) * 2654435761u;
     return static_cast<int>(h & 0x7FFFFFFFu);
 }
 

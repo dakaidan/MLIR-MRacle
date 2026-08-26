@@ -2,6 +2,7 @@
 
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 
@@ -271,6 +272,15 @@ JsonValue appliedTransformsToJson(
     return arr;
 }
 
+JsonValue issueToJson(const VerdictIssue &issue) {
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "status", jsonString(issueSeverityToString(issue.severity)));
+    if (!issue.outcome.empty())
+        jsonPut(obj, "outcome", jsonString(issue.outcome));
+    jsonPut(obj, "reason", jsonString(issue.reason));
+    return obj;
+}
+
 JsonValue threadResultToJson(const ThreadGroupResult &tg) {
     JsonValue entry = jsonObject();
     jsonPut(entry, "threads", jsonInt(tg.numThreads));
@@ -278,17 +288,48 @@ JsonValue threadResultToJson(const ThreadGroupResult &tg) {
     jsonPut(entry, "source_runs", jsonInt(tg.originalRuns));
     jsonPut(entry, "transformed_runs", jsonInt(tg.transformedRuns));
     jsonPut(entry, "outcome_set", outcomeSetResultToJson(tg.outcomeSet));
+    JsonValue issues = jsonArray();
+    if (!tg.issues.empty()) {
+        for (const auto &issue : tg.issues)
+            jsonPush(issues, issueToJson(issue));
+    } else if (tg.status != "OK") {
+        // legacy runs carry only the joined message; derive a single issue
+        VerdictIssue issue;
+        issue.severity =
+            tg.status == "ERROR" ? IssueSeverity::Fail : IssueSeverity::Warn;
+        issue.reason = tg.message;
+        jsonPush(issues, issueToJson(issue));
+    }
+    if (!issues.array.empty())
+        jsonPut(entry, "issues", std::move(issues));
     return entry;
 }
 
-// short category of the first non-OK thread, or the pipeline error itself
-std::string runMessage(const RunInfo &info) {
-    for (const auto &tg : info.threadResults)
-        if (tg.status != "OK")
-            return tg.message;
+// structured FAIL/WARN issues for a run, FAIL before WARN. The default
+// pipeline copies the oracle's issues into RunInfo; legacy runs have none,
+// so they fall back to deriving issues from thread results / error / warn.
+std::vector<VerdictIssue> collectRunIssues(const RunInfo &info) {
+    if (!info.issues.empty())
+        return info.issues;
+    std::vector<VerdictIssue> issues;
+    for (const auto &tg : info.threadResults) {
+        if (tg.status == "OK")
+            continue;
+        VerdictIssue issue;
+        issue.severity =
+            tg.status == "ERROR" ? IssueSeverity::Fail : IssueSeverity::Warn;
+        issue.reason = tg.message;
+        issues.push_back(std::move(issue));
+    }
     if (!info.error.empty())
-        return info.error;
-    return info.warn;
+        issues.push_back({IssueSeverity::Fail, "", info.error});
+    if (!info.warn.empty())
+        issues.push_back({IssueSeverity::Warn, "", info.warn});
+    std::stable_partition(issues.begin(), issues.end(),
+                          [](const VerdictIssue &i) {
+                              return i.severity == IssueSeverity::Fail;
+                          });
+    return issues;
 }
 
 JsonValue relationToJson(OutcomeRelation relation) {
@@ -310,9 +351,11 @@ JsonValue runMetadataToJson(const RunInfo &info) {
     std::string status = runStatusString(info);
     jsonPut(obj, "status", jsonString(status));
 
-    std::string message = runMessage(info);
-    if (!message.empty())
-        jsonPut(obj, "message", jsonString(message));
+    JsonValue issues = jsonArray();
+    for (const auto &issue : collectRunIssues(info))
+        jsonPush(issues, issueToJson(issue));
+    if (!issues.array.empty())
+        jsonPut(obj, "issues", std::move(issues));
 
     jsonPut(obj, "seed", jsonInt(info.seed));
     jsonPut(obj, "requested_transforms", requestedTransformsToJson(info));
@@ -326,16 +369,14 @@ JsonValue runInfoToJson(const RunInfo &info) {
 }
 
 std::string runStatusString(const RunInfo &info) {
-    if (!info.error.empty())
-        return "ERROR";
-    for (const auto &tg : info.threadResults)
-        if (tg.status == "ERROR")
+    // structured issues are authoritative when present: FAIL drives ERROR,
+    // WARN drives WARN, regardless of the order they were recorded in
+    for (const auto &issue : collectRunIssues(info))
+        if (issue.severity == IssueSeverity::Fail)
             return "ERROR";
-    for (const auto &tg : info.threadResults)
-        if (tg.status == "WARN")
+    for (const auto &issue : collectRunIssues(info))
+        if (issue.severity == IssueSeverity::Warn)
             return "WARN";
-    if (!info.warn.empty())
-        return "WARN";
     return "OK";
 }
 

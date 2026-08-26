@@ -25,7 +25,7 @@ SANITIZER_PATTERNS = [
     r"SUMMARY: (Thread|Address|UndefinedBehavior|Leak)Sanitizer",
 ]
 
-
+# returns the root of the mlir_wheel installation, or exits if not found
 def mlir_wheel_root():
     try:
         return subprocess.check_output(
@@ -36,7 +36,7 @@ def mlir_wheel_root():
         sys.exit("mlir_wheel not installed; create the uv venv and run "
                  "`uv pip install -r requirements.txt` first")
 
-
+# returns the build directory for the given sanitizer configuration, or exits if not found
 def build_dir_for(sanitizers):
     env = os.environ.get("MLIR_MRACLE_BUILD_DIR")
     if env:
@@ -45,7 +45,7 @@ def build_dir_for(sanitizers):
         return PROJECT_ROOT / "build"
     return PROJECT_ROOT / f"build-{sanitizer_build_suffix(sanitizers)}"
 
-
+# returns the suffix used for the build directory for the given sanitizer configuration
 def sanitizer_build_suffix(sanitizers):
     if sanitizers == "thread":
         return "tsan"
@@ -98,7 +98,6 @@ def source_fingerprint():
                 pass
     return hasher.hexdigest()[:16]
 
-
 def cached_binary_path(opt_level, sanitizers):
     h = hashlib.sha256()
     h.update(str(opt_level).encode())
@@ -107,7 +106,6 @@ def cached_binary_path(opt_level, sanitizers):
     digest = h.hexdigest()[:16]
     label = sanitizers.replace(",", "-") if sanitizers else "none"
     return EXECUTABLE_CACHE_DIR / f"opt{opt_level}_{label}_{digest}" / BINARY_NAME
-
 
 def build_binary(opt_level=2, sanitizers="thread"):
     cmake = shutil.which("cmake")
@@ -149,9 +147,12 @@ def scan_sanitizer_output(stderr_text):
 def save_sanitizer_log(campaign_dir, stderr_text):
     if not campaign_dir:
         return
+    hits = scan_sanitizer_output(stderr_text)
+    if not hits:
+        return
     log = Path(campaign_dir) / "sanitizer.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text(stderr_text)
+    log.write_text("\n".join(hits) + "\n")
 
 
 def main():

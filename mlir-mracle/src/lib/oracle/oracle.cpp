@@ -144,6 +144,8 @@ OracleResult oracleCompare(const ExecutionResult &exec,
                            std::to_string(src.arity) +
                            " vs transformed arity " +
                            std::to_string(tr.arity)};
+        out.compare.issues.push_back(
+            {IssueSeverity::Fail, "", "result arity mismatch"});
         return out;
     }
 
@@ -156,6 +158,8 @@ OracleResult oracleCompare(const ExecutionResult &exec,
                        srcST.outcomes.front() == trST.outcomes.front();
     if (!singleMatch) {
         out.compare = {false, false, "FAIL: single-thread determinism mismatch"};
+        out.compare.issues.push_back(
+            {IssueSeverity::Fail, "", "single-thread determinism mismatch"});
         return out;
     }
 
@@ -171,36 +175,53 @@ OracleResult oracleCompare(const ExecutionResult &exec,
     std::vector<std::string> failReasons;
     std::vector<std::string> warnReasons;
     std::vector<std::string> rerunReasons;
-    auto note = [&](const StateVerdict &v, std::string what) {
-        if (v.fail)
+    std::vector<VerdictIssue> failIssues;
+    std::vector<VerdictIssue> warnIssues;
+    // pending replay states carry no structured issue: they are not a final
+    // verdict, and the merged post-replay comparison re-judges them
+    auto note = [&](const StateVerdict &v, std::string what,
+                    VerdictIssue issue) {
+        if (v.fail) {
+            issue.severity = IssueSeverity::Fail;
+            failIssues.push_back(std::move(issue));
             failReasons.push_back(std::move(what));
-        else if (v.warn)
+        } else if (v.warn) {
+            issue.severity = IssueSeverity::Warn;
+            warnIssues.push_back(std::move(issue));
             warnReasons.push_back(std::move(what));
-        else if (v.rerun)
+        } else if (v.rerun) {
             rerunReasons.push_back(std::move(what));
+        }
     };
 
     auto judgeMissing = [&](const JointOutcome &o) {
+        std::string outcome = formatOutcome(o);
         note(judgeMissingState(outcomeCount(src, o), src.totalRuns,
                                tr.totalRuns, opts.thresholdPct,
                                opts.postReruns),
-             "missing outcome: " + formatOutcome(o));
+             "missing outcome: " + outcome,
+             {IssueSeverity::Fail, outcome, "missing outcome"});
     };
     auto judgeNovel = [&](const JointOutcome &o) {
+        std::string outcome = formatOutcome(o);
         note(judgeNovelState(outcomeCount(tr, o), tr.totalRuns,
                              opts.thresholdPct, opts.postReruns),
-             "novel outcome: " + formatOutcome(o));
+             "novel outcome: " + outcome,
+             {IssueSeverity::Fail, outcome, "novel outcome"});
     };
     auto judgeShared = [&](const JointOutcome &o) {
+        std::string outcome = formatOutcome(o);
         note(judgeSharedState(outcomeCount(src, o), src.totalRuns,
                               outcomeCount(tr, o), tr.totalRuns,
                               opts.thresholdPct),
-             "rate shift on shared outcome: " + formatOutcome(o));
+             "rate shift on shared outcome: " + outcome,
+             {IssueSeverity::Fail, outcome, "rate shift on shared outcome"});
     };
     auto judgeNovelValue = [&](const NovelValue &nv) {
-        note({false, true, false},
-             "novel value: var" + std::to_string(nv.first) + "=" +
-                 std::to_string(nv.second));
+        std::string value = "var" + std::to_string(nv.first) + "=" +
+                            std::to_string(nv.second);
+        note({false, true, false}, "novel value: " + value,
+             {IssueSeverity::Warn, value, "novel value"});
     };
 
     switch (opts.relation) {
@@ -233,6 +254,9 @@ OracleResult oracleCompare(const ExecutionResult &exec,
         std::vector<std::string> all = failReasons;
         all.insert(all.end(), warnReasons.begin(), warnReasons.end());
         out.compare = {false, false, joinReasons(all)};
+        out.compare.issues = failIssues;
+        out.compare.issues.insert(out.compare.issues.end(),
+                                  warnIssues.begin(), warnIssues.end());
         return out;
     }
     if (!rerunReasons.empty()) {
@@ -246,6 +270,7 @@ OracleResult oracleCompare(const ExecutionResult &exec,
     }
     if (!warnReasons.empty()) {
         out.compare = {true, true, joinReasons(warnReasons)};
+        out.compare.issues = warnIssues;
         return out;
     }
     out.compare = {true, false, ""};

@@ -23,10 +23,6 @@ struct OracleOptions {
     // false while the pipeline replays rare states; the pipeline's final
     // call sets it so post-replay verdicts are judged on merged data
     bool postReruns = false;
-    // reserved for a later iteration: a post-WARN replay under TSan/UBSan
-    // would escalate a crash found during that replay to FAIL instead of
-    // reporting the rate shift; plumbing is not wired yet
-    bool sanitizeTriage = false;
 };
 
 struct OracleResult {

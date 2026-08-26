@@ -31,7 +31,6 @@ struct CompileOptions {
     int binaryCount = 5;
     bool shuffleCode = true;
     uint32_t shuffleSeed = 42;
-    bool enableTsan = false;
 };
 
 struct CompiledBinary {

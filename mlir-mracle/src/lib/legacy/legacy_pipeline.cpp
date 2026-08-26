@@ -43,6 +43,7 @@ static ThreadGroupResult threadResultFromCompare(
     tg.numThreads = t;
     tg.status = statusFromVerdict(cmp.ok, cmp.warn);
     tg.message = cmp.message;
+    tg.issues = cmp.issues;
     tg.originalRuns = srcRuns;
     tg.transformedRuns = trRuns;
     tg.outcomeSet = std::move(outcomeSet);

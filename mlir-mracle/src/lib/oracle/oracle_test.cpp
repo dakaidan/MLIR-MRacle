@@ -75,6 +75,40 @@ void expectMessageContains(const char *name, const std::string &msg,
         ++failures;
 }
 
+void expectIssue(const char *name, const OracleResult &r,
+                 mlir_mracle::IssueSeverity severity, const char *reason,
+                 const char *outcome) {
+    bool pass = false;
+    for (const auto &issue : r.compare.issues)
+        if (issue.severity == severity && issue.reason == reason &&
+            (outcome == nullptr || issue.outcome == outcome)) {
+            pass = true;
+            break;
+        }
+    std::printf("[%s] %-42s issues=%zu status=%s reason=\"%s\" outcome=\"%s\"\n",
+                pass ? "PASS" : "FAIL", name, r.compare.issues.size(),
+                mlir_mracle::issueSeverityToString(severity).c_str(), reason,
+                outcome == nullptr ? "" : outcome);
+    if (!pass)
+        ++failures;
+}
+
+// FAIL issues must precede WARN issues in the structured list
+void expectFailIssuesFirst(const char *name, const OracleResult &r) {
+    bool pass = true;
+    bool seenWarn = false;
+    for (const auto &issue : r.compare.issues) {
+        if (issue.severity == mlir_mracle::IssueSeverity::Warn)
+            seenWarn = true;
+        else if (seenWarn)
+            pass = false;
+    }
+    std::printf("[%s] %-42s issues=%zu\n", pass ? "PASS" : "FAIL", name,
+                r.compare.issues.size());
+    if (!pass)
+        ++failures;
+}
+
 void expectNovelValues(const char *name,
                        const std::vector<std::pair<size_t, int64_t>> &actual,
                        const std::vector<std::pair<size_t, int64_t>> &expected) {
@@ -234,8 +268,10 @@ int main() {
         expectResult("equality weak novel pre-replay",
                      oracleCompare(exec, opts), true, false, true);
         opts.postReruns = true;
-        expectResult("equality weak novel post-replay",
-                     oracleCompare(exec, opts), true, true, false);
+        auto r = oracleCompare(exec, opts);
+        expectResult("equality weak novel post-replay", r, true, true, false);
+        expectIssue("equality weak novel post-replay issue", r,
+                    mlir_mracle::IssueSeverity::Warn, "novel outcome", "[4]");
     }
 
     // a significant-but-rare novel count asks for a replay pre-replay and
@@ -277,6 +313,8 @@ int main() {
         expectResult("equality novel value post-replay", r, true, true, false);
         expectMessageContains("equality novel value message",
                               r.compare.message, "novel value: var0=3");
+        expectIssue("equality novel value issue", r,
+                    mlir_mracle::IssueSeverity::Warn, "novel value", "var0=3");
     }
 
     // pre-replay the rare novel set carrying the novel value still asks for
@@ -309,6 +347,12 @@ int main() {
                               "rate shift on shared outcome: [2]");
         expectMessageContains("equality fail plus warn novel",
                               r.compare.message, "novel outcome: [3]");
+        expectIssue("equality fail plus warn rate shift issue", r,
+                    mlir_mracle::IssueSeverity::Fail,
+                    "rate shift on shared outcome", "[2]");
+        expectIssue("equality fail plus warn novel issue", r,
+                    mlir_mracle::IssueSeverity::Warn, "novel outcome", "[3]");
+        expectFailIssuesFirst("equality fail plus warn issue order", r);
     }
 
     // the pre-replay pending message lists warn-worthy sets too
@@ -358,8 +402,11 @@ int main() {
         auto exec = makeExec(src, tr);
         exec.transformedSingleThreadTotal = makeSet({{2, 1}}, 1);
         opts.postReruns = true;
-        expectResult("single-thread mismatch", oracleCompare(exec, opts),
-                     false, false, false);
+        auto r = oracleCompare(exec, opts);
+        expectResult("single-thread mismatch", r, false, false, false);
+        expectIssue("single-thread mismatch issue", r,
+                    mlir_mracle::IssueSeverity::Fail,
+                    "single-thread determinism mismatch", nullptr);
     }
 
     // subset relation: transformed must not add outcomes

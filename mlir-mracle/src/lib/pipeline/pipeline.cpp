@@ -15,6 +15,14 @@
 namespace mlir_mracle {
 namespace {
 
+// converts a pipeline error string into a structured FAIL issue
+VerdictIssue failIssue(const std::string &reason) {
+    VerdictIssue issue;
+    issue.severity = IssueSeverity::Fail;
+    issue.reason = reason;
+    return issue;
+}
+
 // converts one per-binary execution result plus its compiled binary into the
 // concise breakdown appended to run_info.json
 BinaryOutcomeResult toBinaryOutcomeResult(const BinaryExecutionResult &br,
@@ -98,16 +106,20 @@ RunInfo runSingle(const std::string &inputFile, int seed,
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
-    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform))
+    if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform)) {
+        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
+    }
 
     // jitter widens the race windows on both sides with the same seed, so
     // rare states surface more often without biasing the comparison
     if (!applyJitter(setup.mlirContext, *originalModule, seed,
                      setup.runInfo.error) ||
         !applyJitter(setup.mlirContext, *moduleToTransform, seed,
-                     setup.runInfo.error))
+                     setup.runInfo.error)) {
+        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
+    }
 
     // snapshot both jittered modules before lowering overwrites them
     setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
@@ -117,27 +129,31 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     if (!lowerAndTranslate(*originalModule, setup.mlirContext,
                            setup.llvmContext, "source", nullptr,
                            &setup.runInfo.sourceJitLLVM, sourceLLVM,
-                           setup.runInfo.error))
+                           setup.runInfo.error)) {
+        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
+    }
 
     std::unique_ptr<llvm::Module> transformedLLVM;
     if (!lowerAndTranslate(*moduleToTransform, setup.mlirContext,
                            setup.llvmContext, "transformed",
                            &setup.runInfo.loweredMLIR,
                            &setup.runInfo.jitLLVM, transformedLLVM,
-                           setup.runInfo.error))
+                           setup.runInfo.error)) {
+        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
+    }
 
     ExecutionOptions execOpts;
     execOpts.seed = static_cast<uint32_t>(seed);
     execOpts.runsPerBinary = opts.reps;
     execOpts.singleThreadRuns = kDeterminismReps;
-    execOpts.compile.enableTsan = false;
     execOpts.compile.shuffleSeed = static_cast<uint32_t>(seed);
     ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
                                                execOpts);
     if (!exec.error.empty()) {
         setup.runInfo.error = exec.error;
+        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
     }
 
@@ -149,6 +165,7 @@ RunInfo runSingle(const std::string &inputFile, int seed,
                                          opts, oracleOpts);
     populateRunInfoFromExecution(setup.runInfo, exec);
 
+    setup.runInfo.issues = verdict.compare.issues;
     if (!verdict.compare.ok)
         setup.runInfo.error = verdict.compare.message;
     else if (verdict.compare.warn)
