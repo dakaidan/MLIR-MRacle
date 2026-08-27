@@ -78,6 +78,7 @@ flowchart LR
 - Structured campaign output with per-run JSON reports and artifacts (see [Output layout](#output-layout)).
 - Campaign checkpointing and resuming, so an interrupted campaign can be continued via `--campaign-dir`.
 - Python runner and over 30+ litmus-style seeds in `./fuzzing/corpus/seeds`.
+- Extensible to any memory model; ARMv8 currently supported
 
 ## Quick start
 
