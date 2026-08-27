@@ -26,8 +26,7 @@ bool cachingEnabled() {
 std::filesystem::path cacheRoot() {
     if (!cachingEnabled())
         return {};
-    // the runner pins the root so every invocation shares the same cache
-    // regardless of the working directory
+    // pinned so every invocation shares the same cache regardless of the working directory
     if (const char *dir = std::getenv("MLIR_MRACLE_CACHE_DIR"))
         return dir;
     return "cache/v2";
@@ -53,12 +52,7 @@ std::filesystem::path llvmIRCachePath(const std::string &hash) {
     return moduleCacheDir() / (hash + ".ll");
 }
 
-// the baseline cache key includes the sampling budget so a campaign run with
-// a different --reps never reuses a baseline collected with another budget.
-// The key also embeds the result schema version both in the hash input and in
-// the file-name prefix, so a format change neither reuses nor orphans stale
-// entries: the prefix lets ensureCacheDirs sweep them before a new campaign
-// starts.
+// returns the path to the baseline cache file
 std::filesystem::path baselineCachePath(const std::string &hash,
                                         const std::string &variant, int reps) {
     std::string versionedHash =
@@ -68,20 +62,19 @@ std::filesystem::path baselineCachePath(const std::string &hash,
             "_r" + std::to_string(reps) + "_" + variant + ".json");
 }
 
-// removes baseline cache files left by an older result schema: the current
-// schema prefixes its baseline files with "v<N>_", so any other .json in the
-// baseline cache is stale. Runs once per process, before the first baseline
-// lookup or write.
+// removes baseline cache files left by an older result schema
 void sweepStaleBaselines() {
     if (!cachingEnabled())
         return;
+
     static bool swept = false;
     if (swept)
         return;
+
     swept = true;
-    const std::string prefix =
-        "v" + std::to_string(kResultSchemaVersion) + "_";
+    const std::string prefix = "v" + std::to_string(kResultSchemaVersion) + "_";
     std::error_code ec;
+
     for (const auto &entry :
          std::filesystem::directory_iterator(baselineCacheDir(), ec)) {
         if (entry.is_regular_file() &&
@@ -94,6 +87,7 @@ void sweepStaleBaselines() {
 void ensureCacheDirs() {
     if (!cachingEnabled())
         return;
+
     std::error_code ec;
     std::filesystem::create_directories(moduleCacheDir(), ec);
     std::filesystem::create_directories(baselineCacheDir(), ec);
@@ -102,8 +96,10 @@ void ensureCacheDirs() {
 
 bool readFileContent(const std::string &path, std::string &content) {
     std::ifstream f(path, std::ios::binary);
+
     if (!f)
         return false;
+
     content.assign(std::istreambuf_iterator<char>(f),
                    std::istreambuf_iterator<char>());
     return true;
@@ -111,18 +107,22 @@ bool readFileContent(const std::string &path, std::string &content) {
 
 bool writeFileContent(const std::string &path, const std::string &content) {
     std::ofstream f(path, std::ios::binary);
+
     if (!f)
         return false;
+
     f << content;
     return true;
 }
 
 std::string hashString(const std::string &s) {
     uint64_t h = 1469598103934665603ull;
+
     for (unsigned char c : s) {
         h ^= c;
         h *= 1099511628211ull;
     }
+
     std::string hex;
     for (int shift = 60; shift >= 0; shift -= 4)
         hex += "0123456789abcdef"[(h >> shift) & 0xF];
@@ -133,13 +133,17 @@ bool loadCachedModule(const std::string &path, llvm::LLVMContext &ctx,
                       std::unique_ptr<llvm::Module> &module,
                       std::string &error) {
     auto bufOrErr = llvm::MemoryBuffer::getFile(path);
+
     if (!bufOrErr)
         return false;
+
     auto modOrErr = llvm::parseBitcodeFile((*bufOrErr)->getMemBufferRef(), ctx);
+
     if (!modOrErr) {
         error = llvm::toString(modOrErr.takeError());
         return false;
     }
+
     module = std::move(*modOrErr);
     return true;
 }
@@ -147,8 +151,10 @@ bool loadCachedModule(const std::string &path, llvm::LLVMContext &ctx,
 void saveCachedModule(const std::string &path, llvm::Module &module) {
     std::error_code ec;
     llvm::raw_fd_ostream os(path, ec);
+
     if (ec)
         return;
+
     llvm::WriteBitcodeToFile(module, os);
 }
 
@@ -160,14 +166,19 @@ bool loadModuleCache(const std::string &hash, llvm::LLVMContext &ctx,
                      std::string *bitcode, std::string &error) {
     if (!cachingEnabled())
         return false;
+
     if (!loadCachedModule(moduleCachePath(hash).string(), ctx, module, error))
         return false;
+
     if (loweredMLIR)
         readFileContent(loweredCachePath(hash).string(), *loweredMLIR);
+
     if (llvmIR)
         readFileContent(llvmIRCachePath(hash).string(), *llvmIR);
+
     if (bitcode)
         readFileContent(moduleCachePath(hash).string(), *bitcode);
+    
     return true;
 }
 
@@ -176,6 +187,7 @@ void saveModuleCache(const std::string &hash, llvm::Module &module,
                      const std::string &llvmIR) {
     if (!cachingEnabled())
         return;
+
     ensureCacheDirs();
     saveCachedModule(moduleCachePath(hash).string(), module);
     writeFileContent(loweredCachePath(hash).string(), loweredMLIR);
@@ -187,16 +199,19 @@ bool loadBaselineCache(const std::string &sourceHash,
                        ObservedOutcomeSet &set) {
     if (!cachingEnabled())
         return false;
+
     std::string content;
-    if (!readFileContent(baselineCachePath(sourceHash, variant, reps).string(),
-                         content))
+    if (!readFileContent(baselineCachePath(sourceHash, variant, reps).string(), content))
         return false;
+
     auto parsed = llvm::json::parse(content);
     if (!parsed)
         return false;
+
     const auto *obj = parsed->getAsObject();
     if (!obj)
         return false;
+
     return observedOutcomeSetFromJson(*obj, set);
 }
 
@@ -205,14 +220,16 @@ void saveBaselineCache(const std::string &sourceHash,
                        const ObservedOutcomeSet &set) {
     if (!cachingEnabled())
         return;
+
     ensureCacheDirs();
     std::string buf;
     llvm::raw_string_ostream os(buf);
     printJson(observedOutcomeSetToJson(set), os);
+
     os << "\n";
     os.flush();
-    writeFileContent(baselineCachePath(sourceHash, variant, reps).string(),
-                     buf);
+
+    writeFileContent(baselineCachePath(sourceHash, variant, reps).string(), buf);
 }
 
 } // namespace mlir_mracle

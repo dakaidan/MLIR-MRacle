@@ -13,8 +13,7 @@ namespace mlir_mracle {
 // schema version embedded in persistent baseline-cache keys and prefixes
 inline constexpr int kResultSchemaVersion = 8;
 
-// stable 64-bit FNV-1a hash rendered as hex; cache keys only need to match
-// within a machine, not be cryptographic
+// stable 64-bit FNV-1a hash rendered as hex
 std::string hashString(const std::string &s);
 
 // An explicitly empty MLIR_MRACLE_CACHE_DIR disables the disk cache entirely;

@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <string>
 
 namespace mlir_mracle {
 

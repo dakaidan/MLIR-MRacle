@@ -78,7 +78,8 @@ flowchart LR
 - A statistical oracle over equality/subset/superset relations (see [Oracle](#oracle)).
 - An agitation sweep across codegen and runtime parameters (see [Agitation sweep](#agitation-sweep)).
 - Structured campaign output with per-run JSON reports and artifacts (see [Output layout](#output-layout)).
-- Python runner and a litmus-style seed corpus.
+- Campaign checkpointing and resuming, so an interrupted campaign can be continued via `--campaign-dir`.
+- Python runner and over 30+ litmus-style seeds in `./fuzzing/corpus/seeds`.
 
 ## Quick start
 
@@ -142,6 +143,9 @@ Examples:
 
 # emit transformed MLIR only
 .venv/bin/python fuzzing/fuzz_mracle.py --mode=emit --transform=insert-fence fuzzing/corpus/seeds/iriw.mlir
+
+# resume an interrupted campaign
+.venv/bin/python fuzzing/fuzz_mracle.py --campaign-dir=path/to/campaign fuzzing/corpus/seeds
 ```
 
 ### Using the binary directly
