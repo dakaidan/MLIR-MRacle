@@ -19,7 +19,7 @@ namespace mlir_mracle {
 
 namespace {
 
-/// manual fixup for the OpenMP lowering since the conversion refuses to handle memref
+// manual fixup for the OpenMP lowering since the conversion refuses to handle memref
 void promoteOMPAtomicOperands(mlir::ModuleOp module) {
     mlir::OpBuilder builder(module.getContext());
     module.walk([&](mlir::Operation *op) {
@@ -66,28 +66,24 @@ void promoteOMPAtomicOperands(mlir::ModuleOp module) {
 } // namespace
 
 mlir::LogicalResult lowerToLLVM(mlir::ModuleOp module, mlir::MLIRContext *ctx) {
-    // Stage 1: Lower high-level dialects to structured loops and memrefs.
+
     mlir::PassManager pm1(ctx);
-    pm1.addPass(mlir::createLowerAffinePass());                 // affine -> loops/memref
-    // Run a verifier pass early to catch invalid atomic regions before any lowering.
-    // (This is the missing piece that would report the real error.)
-    // pm1.addPass(mlir::createVerifierPass()); // if you have a custom verifier pass
+    pm1.addPass(mlir::createLowerAffinePass()); // affine -> loops/memref
+
     if (mlir::failed(pm1.run(module)))
         return mlir::failure();
 
-    // Stage 2: Convert structured control flow and memory to LLVM-compatible forms.
-    // Keep SCF conversion *before* OpenMP conversion, but after high-level lowering.
     mlir::PassManager pm2(ctx);
-    pm2.addPass(mlir::createSCFToControlFlowPass());            // scf.if -> cf.br
+    pm2.addPass(mlir::createSCFToControlFlowPass()); // scf -> cf
 
     pm2.addPass(mlir::createFinalizeMemRefToLLVMConversionPass()); // clean up unrealized casts
     if (mlir::failed(pm2.run(module)))
         return mlir::failure();
 
-    // Custom pass to promote atomic operands (now LLVM pointers).
+    // Custom pass to promote atomic operands to LLVM pointers.
     promoteOMPAtomicOperands(module);
 
-    // Stage 3: Convert remaining dialects to LLVM and finalize.
+    // convert to LLVM dialect
     mlir::PassManager pm3(ctx);
     pm3.addPass(mlir::createArithToLLVMConversionPass());       // arith -> llvm
     pm3.addPass(mlir::createConvertControlFlowToLLVMPass());    // cf -> llvm

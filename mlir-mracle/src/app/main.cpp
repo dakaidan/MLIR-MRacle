@@ -16,8 +16,8 @@ int main(int argc, char **argv) {
         mlir_mracle::PipelineOptions opts = cli.pipeline;
         switch (mode) {
         case mlir_mracle::PipelineMode::Emit:
-            // emit mode: --reps is the number of times transformations are
-            // picked and applied; --iter remains the repetition count elsewhere
+            // emit mode: --reps is the number of times transformations are picked and applied
+            // --iter remains the repetition count elsewhere
             opts.numRuns = opts.reps;
             std::cout << mlir_mracle::runEmitPipeline(opts).campaignDir << "\n";
             break;
