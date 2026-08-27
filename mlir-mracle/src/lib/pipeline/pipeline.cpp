@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <set>
 
 namespace mlir_mracle {
 namespace {
@@ -23,8 +24,7 @@ VerdictIssue failIssue(const std::string &reason) {
     return issue;
 }
 
-// converts a compiled binary's accumulated outcomes into the concise
-// breakdown appended to run_info.json
+// summarises a single binary's outcome set for the run-level union outcome sets
 BinaryOutcomeSummary toBinaryOutcomeSummary(const CompiledBinary &bin) {
     BinaryOutcomeSummary summary;
     summary.identity = bin.identity;
@@ -32,9 +32,7 @@ BinaryOutcomeSummary toBinaryOutcomeSummary(const CompiledBinary &bin) {
     return summary;
 }
 
-// fills the run-level union outcome sets and the per-binary breakdown from
-// the finished execution; the verdict data lives in these sets, so no single
-// team size is reported
+// fills runInfo with the outcome sets and run counts from the execution result
 void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
     info.sourceRuns = exec.sourceTotal.totalRuns;
     info.transformedRuns = exec.transformedTotal.totalRuns;
@@ -49,12 +47,8 @@ void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
         info.binaryOutcomes.push_back(toBinaryOutcomeSummary(bin));
 }
 
-// replays rare states in rounds of --reruns extra source runs per binary
-// until the verdict resolves to ok/fail or the total source runs across all
-// binaries reach the --max-runs cap, then returns the final post-replay
-// comparison judged on merged data. When the cap is reached with rare states
-// still unresolved, a final TSan-instrumented triage merges scheduling-
-// perturbed runs into the totals before the final judgement.
+// replays the compilation and execution of all binaries in rounds of extra runs
+// used in pipeline when results are inconclusive
 OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
                            const PipelineOptions &opts,
                            OracleOptions oracleOpts,
@@ -64,6 +58,7 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
     int64_t binaryCount =
         std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
     int replayRound = 0;
+
     while ((verdict.needsRerun || verdict.compare.warn()) &&
            exec.sourceTotal.totalRuns < opts.maxSourceReps) {
         int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
@@ -71,20 +66,16 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
             opts.retestReps, budget / binaryCount));
         if (extra <= 0)
             break;
-        // each round re-agitates with a seed derived directly from the run
-        // seed (round 1 -> seed+1, ...), so the replay sequence is
-        // reproducible from --seed alone and every round draws a fresh
-        // team-size mix
+        // each round re-agitates with a seed derived directly from the run seed
+        // allowing reproducible replay of the same rare states across rounds
         rerunAllBinaries(exec, extra,
                          static_cast<uint32_t>(seed) +
                              static_cast<uint32_t>(++replayRound),
                          configCount);
         verdict = oracleCompare(exec, oracleOpts);
     }
-    // the cap was reached with rare states still unresolved: TSan perturbs
-    // memory-access scheduling, so a final triage surfaces them or confirms
-    // them absent under instrumentation; a failed triage keeps the plain
-    // post-rerun verdict
+    // if the verdict is still inconclusive after the maxSourceReps cap
+    // run a final TSan triage
     if (verdict.needsRerun)
         runTsanTriage(sourceModule, transformedModule, exec, opts.retestReps,
                       static_cast<uint32_t>(seed) + 0x9e3779b9u, configCount);
@@ -94,27 +85,20 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
 
 } // namespace
 
-// default pipeline single run: applies the requested transforms, adds
-// symmetric jitter delay chains to both modules, lowers and translates both
-// modules directly (no persistent cache, no source memo), runs the agitation
-// sweep through the harness, then replays rare states in rounds of --reruns
-// until they resolve or the total source runs across all binaries reach the
-// --max-runs cap, with a final TSan triage when the cap is reached
-// unresolved. The verdict is the final post-replay comparison, judged on
-// merged data.
 RunInfo runSingle(const std::string &inputFile, int seed,
                   int runIdx, const PipelineOptions &opts) {
     MLIRSetup setup(seed, runIdx, opts.transform, opts.maxApply, opts.model);
 
     mlir::OwningOpRef<mlir::ModuleOp> originalModule;
     mlir::OwningOpRef<mlir::ModuleOp> moduleToTransform;
+
+    // if unable to apply the requested transforms, return a runInfo with the error and no verdict
     if (!applyTransforms(setup, inputFile, originalModule, moduleToTransform)) {
         setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
         return setup.runInfo;
     }
 
-    // jitter widens the race windows on both sides with the same seed, so
-    // rare states surface more often without biasing the comparison
+    // apply jitter as part of the agitation sweep, fail if unable
     if (!applyJitter(setup.mlirContext, *originalModule, seed,
                      setup.runInfo.error) ||
         !applyJitter(setup.mlirContext, *moduleToTransform, seed,
@@ -127,6 +111,7 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
     setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
 
+    // lower and translate both modules to LLVM IR, fail if unable
     std::unique_ptr<llvm::Module> sourceLLVM;
     if (!lowerAndTranslate(*originalModule, setup.mlirContext,
                            setup.llvmContext, "source", nullptr,
@@ -150,6 +135,8 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     execOpts.seed = static_cast<uint32_t>(seed);
     execOpts.runsPerBinary = opts.reps;
     execOpts.singleThreadRuns = kDeterminismReps;
+    
+    // run the execution harness: compiles all modules, runs agitation, collects results
     ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
                                                execOpts);
     if (!exec.error.empty()) {
@@ -168,16 +155,13 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     populateRunInfoFromExecution(setup.runInfo, exec);
 
     setup.runInfo.issues = verdict.compare.issues;
+
     if (!verdict.compare.ok())
         setup.runInfo.error = verdict.compare.message();
     else if (verdict.compare.warn())
         setup.runInfo.warn = verdict.compare.message();
     return setup.runInfo;
 }
-
-// core pipeline function for the default agitation-sweep oracle: runs the
-// oracle comparison over transformed vs source modules with rare-state
-// replay. Each run is published to the campaign folder as it completes.
 
 PipelineResult runPipeline(const PipelineOptions &opts) {
     PipelineResult result;
@@ -186,6 +170,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
     createCampaignDir(opts);
     createCampaignStatusDirs(gCampaignDir);
 
+    // multi-file handling
     std::vector<std::string> multiFiles;
     if (!opts.multiFolder.empty()) {
         multiFiles = collectMLIRFiles(opts.multiFolder);
@@ -204,6 +189,7 @@ PipelineResult runPipeline(const PipelineOptions &opts) {
         }
     }
 
+    // main pipeline loop, calls runSingle
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
         int runSeed = runSeedFor(opts, runIdx);

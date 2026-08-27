@@ -7,11 +7,10 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <set>
 
 namespace mlir_mracle {
 
-// emit mode single run: apply the requested transforms and return the
-// resulting MLIR without lowering, JIT, or oracle comparison
 RunInfo emitSingle(const std::string &inputFile, int seed,
                           int runIdx, const std::string &transform,
                           int maxApply, const std::string &model) {
@@ -23,10 +22,6 @@ RunInfo emitSingle(const std::string &inputFile, int seed,
     return setup.runInfo;
 }
 
-// generator mode for --mode=emit: applies the requested transforms to one
-// file or random files from a folder and returns the transformed MLIR text.
-// Each run is written to the output folder as it completes; there is no
-// execution state.
 PipelineResult runEmitPipeline(const PipelineOptions &opts) {
     PipelineResult result;
     result.runs.reserve(opts.numRuns);
@@ -50,6 +45,7 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
             std::filesystem::remove(entry.path(), ec);
     }
 
+    // multi-file handling
     std::vector<std::string> multiFiles;
     if (!opts.multiFolder.empty()) {
         multiFiles = collectMLIRFiles(opts.multiFolder);
@@ -68,6 +64,7 @@ PipelineResult runEmitPipeline(const PipelineOptions &opts) {
         }
     }
 
+    // main emit pipeline loop, calls emitSingle
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
         int runSeed = runSeedFor(opts, runIdx);

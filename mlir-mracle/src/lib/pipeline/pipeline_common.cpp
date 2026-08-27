@@ -63,8 +63,7 @@ std::vector<std::string> collectMLIRFiles(const std::string &folder) {
     return files;
 }
 
-// picks a random .mlir file for a run; the per-run file RNG is derived only
-// from seed and run index, so a fixed seed picks the same file every time
+// picks a random .mlir file for a run
 std::string pickInputFile(const PipelineOptions &opts,
                           const std::vector<std::string> &multiFiles,
                           int runIdx, int runSeed) {
@@ -77,9 +76,7 @@ std::string pickInputFile(const PipelineOptions &opts,
     return multiFiles[dist(fileRng)];
 }
 
-// per-run seed: fixed when --seed is given, otherwise a process-wide random
-// base mixed with the run index, so every campaign draws fresh entropy while
-// runs within one campaign stay distinct and reproducible from the base
+// if the user provided a seed, use it, otherwise random seed
 int runSeedFor(const PipelineOptions &opts, int runIdx) {
     if (opts.seed >= 0)
         return opts.seed;
@@ -91,7 +88,7 @@ int runSeedFor(const PipelineOptions &opts, int runIdx) {
     return static_cast<int>(h & 0x7FFFFFFFu);
 }
 
-// parses a source file, capturing diagnostics in error
+// parses MLIR source file
 bool parseModuleFile(const std::string &file, mlir::MLIRContext &ctx,
                      mlir::OwningOpRef<mlir::ModuleOp> &module,
                      std::string &error) {
@@ -110,8 +107,7 @@ bool parseModuleFile(const std::string &file, mlir::MLIRContext &ctx,
     return true;
 }
 
-// parses a source module, clones it, and runs the metamorphic pass pipeline
-// on the clone; used by both the full pipeline and emit mode
+// applies the requested transforms to MLIR module
 bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
                      mlir::OwningOpRef<mlir::ModuleOp> &originalModule,
                      mlir::OwningOpRef<mlir::ModuleOp> &transformedModule) {
@@ -138,9 +134,7 @@ bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
     return true;
 }
 
-// Applies the jitter transform to a module: the pass runs with the fixed
-// transform name and the run's own seed, so both sides of the comparison
-// receive the same seeded RNG stream and the jitter density stays symmetric.
+// Applies random jitter to MLIR module for agitation
 bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module, int seed,
                  std::string &error) {
     mlir::ScopedDiagnosticHandler diagHandler(
@@ -159,8 +153,7 @@ bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module, int seed,
     return true;
 }
 
-// lowers a module to the LLVM dialect and translates it to LLVM IR,
-// capturing diagnostics in error; IR dumps are only produced when requested
+// lowers a module to the LLVM dialect and translates it to LLVM IR
 bool lowerAndTranslate(mlir::ModuleOp module, mlir::MLIRContext &mlirCtx,
                        llvm::LLVMContext &llvmCtx, const std::string &label,
                        std::string *loweredMLIR, std::string *llvmIR,

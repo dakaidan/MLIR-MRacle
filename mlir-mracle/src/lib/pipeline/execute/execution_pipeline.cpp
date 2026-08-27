@@ -12,11 +12,6 @@
 
 namespace mlir_mracle {
 
-// straight execution mode: parse, lower, JIT and run the source program at
-// every team size without any transformation or comparison. Joint outcome
-// frequencies are recorded per thread count. Every call compiles and runs
-// fresh: execution mode is a probe of the run, not a comparison, so nothing
-// is memoised or cached across runs.
 ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
                                         int runIdx, int reps) {
     ExecutionRunResult result;
@@ -27,10 +22,12 @@ ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     mlir::MLIRContext mlirCtx;
     initializeMLIRContext(mlirCtx);
 
+    // parse file
     mlir::OwningOpRef<mlir::ModuleOp> module;
     if (!parseModuleFile(inputFile, mlirCtx, module, result.error))
         return result;
 
+    // lower and translate to LLVM IR, fail if unable
     llvm::LLVMContext llvmCtx;
     std::unique_ptr<llvm::Module> llvmModule;
     if (!lowerAndTranslate(*module, mlirCtx, llvmCtx, "source", nullptr,
@@ -45,6 +42,7 @@ ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
         return result;
     }
 
+    // run the compiled function with different thread counts and collect the observed outcomes
     for (int t : kThreadCounts) {
         ObservedOutcomeSet set = collectOutcomeSet(fn, reps, t);
         ExecutionThreadResult tr;
@@ -57,16 +55,13 @@ ExecutionRunResult executeSingle(const std::string &inputFile, int seed,
     return result;
 }
 
-// core pipeline function for --mode=execution: executes each input file
-// as-is and records joint outcome frequencies per thread count. Each run
-// is published to the campaign folder as it completes; there is no status
-// classification.
 ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
     ExecutionPipelineResult result;
     result.runs.reserve(opts.numRuns);
 
     createCampaignDir(opts);
 
+    // multi-file handling
     std::vector<std::string> files;
     if (!opts.multiFolder.empty()) {
         files = collectMLIRFiles(opts.multiFolder);
@@ -83,9 +78,7 @@ ExecutionPipelineResult runExecutionPipeline(const PipelineOptions &opts) {
         }
     }
 
-    // each run is an independent probe: the file is picked per run from the
-    // run seed (matching the other pipelines), and executeSingle recompiles
-    // from scratch so repeated runs of one file exercise fresh JIT state
+    // loop over runs, calling executeSingle for each input file and each run, collecting results
     for (int i = 0; i < opts.numRuns; ++i) {
         int runIdx = opts.runNumber + i;
         int runSeed = runSeedFor(opts, runIdx);
