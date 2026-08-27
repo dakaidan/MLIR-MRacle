@@ -9,17 +9,12 @@
 
 namespace mlir_mracle {
 
-// writes the artifacts of a single run under
-// <campaignDir>/<status>/run<N>_seed<S>/ so a long campaign publishes each
-// run's output as it completes instead of buffering everything until the end.
-// unionFormat selects the default run_info.json layout (union outcome sets
-// plus per-binary breakdown); the alternative writes the thread-group layout.
+// saves the MLIR/LLVM artifacts produced during a run in a campaign for later possible inspection
 void saveRunArtifacts(const RunInfo &run, const std::string &status,
                       const std::string &campaignDir,
                       bool unionFormat = false);
 
-// writes the .ll artifact of one execution-mode run under
-// <campaignDir>/run<N>_seed<S>/
+// writes the .ll artifact during execution mode
 void saveExecutionArtifacts(const ExecutionRunResult &run,
                             const std::string &campaignDir);
 
