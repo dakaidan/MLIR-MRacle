@@ -16,6 +16,7 @@
 namespace mlir {
 namespace metamorphic {
 
+// reorders two relaxed read and write operations in a function, if possible, to commute them
 bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
                                 std::mt19937 &rng) {
     SmallVector<std::pair<omp::AtomicReadOp, omp::AtomicWriteOp>> candidates;
@@ -51,6 +52,7 @@ bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
     return true;
 }
 
+// reorders two relaxed write operations in a function, if possible, to commute them
 bool tryCommuteRelaxedWriteWrite(func::FuncOp op, RewriterBase &rewriter,
                                  std::mt19937 &rng) {
     SmallVector<std::pair<omp::AtomicWriteOp, omp::AtomicWriteOp>> candidates;

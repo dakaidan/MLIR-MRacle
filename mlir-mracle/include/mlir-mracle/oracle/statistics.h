@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <set>
 
 namespace mlir_mracle {
 namespace oracle_detail {

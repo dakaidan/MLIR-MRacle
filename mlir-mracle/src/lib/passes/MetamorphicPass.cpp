@@ -28,6 +28,7 @@ namespace mlir {
 #define GEN_PASS_DEF_METAMORPHICPASS
 #include "MetamorphicPass.inc"
 
+// the core metamorphic pass that applies a number of transformations to an MLIR module
 struct MetamorphicPass
     : public impl::MetamorphicPassBase<MetamorphicPass> {
 
@@ -40,9 +41,8 @@ struct MetamorphicPass
         IRRewriter rewriter(op->getContext());
         std::mt19937 rng(seed.getValue());
 
-        // Resolve the registry for the requested memory model. Generic
-        // transforms are always included; an empty model adds no
-        // memory-model-specific ones.
+        // Resolve the registry for the requested memory model
+        // Generic transforms are always available, but model-specific transforms may be requested
         auto registry = metamorphic::getTransforms(model.getValue());
 
         auto findSpec =
@@ -53,9 +53,8 @@ struct MetamorphicPass
             return nullptr;
         };
 
+        // parse requested transform names
         std::string requested = transform.getValue();
-
-        // parse the comma-separated requested list, empty means "pick at random"
         SmallVector<llvm::StringRef, 4> requestedNames;
         if (!requested.empty())
             llvm::StringRef(requested).split(requestedNames, ',');
@@ -91,24 +90,25 @@ struct MetamorphicPass
         if (funcs.empty())
             return;
 
-        // Shuffle the functions so each one gets its own random tries.
-        // Every function receives up to kMaxTransformAttempts independent
-        // random attempts; a function that fails all of them is abandoned in
-        // favour of the next one, and only when every function has been
-        // exhausted do we signal failure.
+        // Shuffle the functions so each one gets its own random tries
+        // Each function will be attempted to be transformed up to kMaxTransformAttempts times
+        // If a function is successfully transformed, the pass will exit early
+        // If no function is successfully transformed after kMaxTransformAttempts, the pass will fail
         std::shuffle(funcs.begin(), funcs.end(), rng);
         constexpr int kMaxTransformAttempts = 3;
+        
         for (func::FuncOp target : funcs) {
             for (int attempt = 0; attempt < kMaxTransformAttempts; ++attempt) {
                 int transformCounter = 0;
                 std::optional<mlir_mracle::OutcomeRelation> aggregate;
 
-                // keep applying random transformations until max applications
-                // is reached; transforms whose relation would contradict the
-                // direction already established are excluded from the draw
+                // keep applying random transformations until max applications is reached
+                // transforms whose relation would contradict the direction already established
+                // are excluded from the draw pre-emptively
                 while (transformCounter < maxApply) {
-                    SmallVector<const metamorphic::MetamorphicTransform *>
-                        allowed;
+                    SmallVector<const metamorphic::MetamorphicTransform *> allowed;
+                    
+                    // use relations to filter the list of transforms
                     for (const metamorphic::MetamorphicTransform *spec :
                          transforms)
                         if (metamorphic::canApplyAfter(
@@ -119,6 +119,7 @@ struct MetamorphicPass
                     if (allowed.empty())
                         break;
 
+                    // randomly shuffle the allowed transforms and pick one to apply
                     std::shuffle(allowed.begin(), allowed.end(), rng);
                     bool applied = false;
                     for (const metamorphic::MetamorphicTransform *spec :
@@ -136,8 +137,9 @@ struct MetamorphicPass
                                      target.getName().str()});
                                 runInfo->transformApplied = true;
                             }
-                            llvm::errs() << "=== AFTER "
-                                         << spec->getName() << " ===\n";
+
+                            // print the transformed function to llvm:: errs for debugging purposes
+                            llvm::errs() << "=== AFTER " << spec->getName() << " ===\n";
                             target.print(llvm::errs());
                             llvm::errs() << "\n";
                             applied = true;
@@ -179,4 +181,4 @@ std::unique_ptr<Pass> createMetamorphicPass(
 } // namespace mlir
 
 #define GEN_PASS_REGISTRATION
-#include "MetamorphicPass.inc"
+#include "MetamorphicPass.inc"#include <list>
