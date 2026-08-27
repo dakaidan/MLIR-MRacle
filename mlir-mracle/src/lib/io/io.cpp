@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <vector>
 
 namespace mlir_mracle {
 
