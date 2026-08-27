@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <set>
 
 namespace mlir_mracle {
 namespace {
@@ -121,9 +122,8 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
         std::exit(1);
     }
 
-    // Let the retest cap ride along with --reps: a budget above the default
-    // cap raises the cap to the requested count instead of aborting, so the
-    // source baseline always reaches the requested run count.
+    // Instead of failing, we just set maxSourceReps to reps if it is less than reps
+    // Ensures that reps is always the intended number of runs for users
     if (cli.pipeline.maxSourceReps < cli.pipeline.reps)
         cli.pipeline.maxSourceReps = cli.pipeline.reps;
 

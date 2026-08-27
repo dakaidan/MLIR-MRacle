@@ -38,9 +38,6 @@ static void initNativeTarget() {
 }
 
 // The TSan runtime must be linked into the host binary at startup
-// (-fsanitize=thread): compiler-rt's TSan cannot be dlopen'd late on macOS,
-// and its Linux runtime is not on the loader path. JIT'd code then resolves
-// __tsan_* symbols against the already-initialised runtime.
 static bool loadTsanRuntime(std::string *error) {
     if (llvm::sys::DynamicLibrary::SearchForAddressOfSymbol("__tsan_init"))
         return true;
@@ -49,9 +46,7 @@ static bool loadTsanRuntime(std::string *error) {
     return false;
 }
 
-// Instruments the module with ThreadSanitizer. TSan instruments every memory
-// access, perturbing scheduling so rare outcomes surface under concurrent
-// execution.
+// Instruments the module with TSan
 static bool instrumentWithTsan(llvm::Module &module, std::string *error) {
     if (!loadTsanRuntime(error))
         return false;
@@ -61,6 +56,7 @@ static bool instrumentWithTsan(llvm::Module &module, std::string *error) {
     llvm::CGSCCAnalysisManager CGAM;
     llvm::ModuleAnalysisManager MAM;
 
+    // Register all the LLVM basic analyses with the managers
     llvm::PassBuilder PB;
     PB.registerModuleAnalyses(MAM);
     PB.registerCGSCCAnalyses(CGAM);
@@ -87,8 +83,7 @@ static void addStateResetFunction(llvm::Module &module) {
     builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "entry", fn));
 
     for (auto &global : module.globals()) {
-        // constants are immutable; storing to one is rejected by the verifier
-        // and would be UB at runtime
+        // constants are immutable; storing to one is rejected by the verifier and would be UB at runtime
         if (global.isDeclaration() || global.isConstant() ||
             !global.hasInitializer() || global.getName().starts_with("llvm."))
             continue;
@@ -109,9 +104,8 @@ static unsigned getResultCount(llvm::Module &module) {
     return 1;
 }
 
-// Adds a "__mlir_mracle_run(i64* results)" wrapper that calls "main" and stores
-// every result into the caller-provided buffer. Each concurrent caller passes
-// its own buffer, so result collection is race-free even with TSan active.
+// Adds a "__mlir_mracle_run(i64* results)" wrapper that calls "main", keeping the JIT caller type-agnostic
+// Result collection is race-free even with TSan active
 static void addResultCaptureFunction(llvm::Module &module) {
     auto &ctx = module.getContext();
     auto *mainFn = module.getFunction("main");
@@ -173,10 +167,7 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
             if (jitOptLevel >= 0)
                 jtmb->setCodeGenOptLevel(
                     static_cast<llvm::CodeGenOptLevel>(jitOptLevel));
-            // Per-basic-block sections are only implemented for ELF
-            // (TargetLoweringObjectFile::getUniqueSectionForFunction is
-            // overridden by ELF alone); on MachO/COFF requesting them makes
-            // the asm printer switch to a null section and crash.
+
             if (bbSections != llvm::BasicBlockSection::None &&
                 jtmb->getTargetTriple().getObjectFormat() == llvm::Triple::ELF) {
                 auto opts = jtmb->getOptions();
@@ -194,7 +185,6 @@ std::function<std::vector<int64_t>()> compileLLVMModuleToFunction(
         return nullptr;
     }
 
-    // shared_ptr keeps compiled code alive as long as the returned callable is referenced.
     std::shared_ptr<llvm::orc::LLJIT> jit(jitOrErr->release());
 
     if (!module) {
