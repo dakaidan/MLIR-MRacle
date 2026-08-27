@@ -1,4 +1,4 @@
-#include "mlir-mracle/app/cli.h"
+#include "cli.h"
 
 #include <cstdlib>
 #include <cstring>

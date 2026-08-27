@@ -1,4 +1,4 @@
-#include "mlir-mracle/app/cli.h"
+#include "cli.h"
 #include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/legacy/legacy_pipeline.h"
 #include "mlir-mracle/pipeline/emit/emit_pipeline.h"
