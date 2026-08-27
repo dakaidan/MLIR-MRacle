@@ -21,6 +21,7 @@ inline double lowerIncompleteGamma(double a, double x) {
     constexpr int kItMax = 200;
     constexpr double kFpMin = 1e-300;
     const double gln = std::lgamma(a);
+
     if (x < a + 1.0) {
         double ap = a;
         double sum = 1.0 / a;
@@ -34,10 +35,12 @@ inline double lowerIncompleteGamma(double a, double x) {
         }
         return sum * std::exp(-x + a * std::log(x) - gln);
     }
+
     double b = x + 1.0 - a;
     double c = 1.0 / kFpMin;
     double d = 1.0 / b;
     double h = d;
+
     for (int i = 1; i <= kItMax; ++i) {
         double an = -static_cast<double>(i) * (static_cast<double>(i) - a);
         b += 2.0;
@@ -53,6 +56,7 @@ inline double lowerIncompleteGamma(double a, double x) {
         if (std::fabs(del - 1.0) < kEps)
             break;
     }
+
     return 1.0 - std::exp(-x + a * std::log(x) - gln) * h;
 }
 
@@ -70,8 +74,10 @@ inline double poissonSurvival(int64_t k, double lambda) {
 inline int64_t outcomeCount(const ObservedOutcomeSet &set,
                             const JointOutcome &o) {
     auto it = std::lower_bound(set.outcomes.begin(), set.outcomes.end(), o);
+    
     if (it == set.outcomes.end() || *it != o)
         return 0;
+
     size_t idx = static_cast<size_t>(std::distance(set.outcomes.begin(), it));
     return idx < set.counts.size() ? set.counts[idx] : 0;
 }
