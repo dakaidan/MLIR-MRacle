@@ -20,6 +20,7 @@ target_link_libraries(mlir_mracle_legacy PUBLIC
     mlir_mracle_execution
     mlir_mracle_io
     mlir_mracle_jit
+    mlir_mracle_core
     mlir_mracle_context
     llvm_mlir_headers
     LLVMCore

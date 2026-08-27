@@ -16,6 +16,7 @@ target_include_directories(mlir_mracle_transforms PUBLIC
 )
 
 target_link_libraries(mlir_mracle_transforms PUBLIC
+    mlir_mracle_core
     llvm_mlir_headers
     MLIRIR
     MLIRFuncDialect

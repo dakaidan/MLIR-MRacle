@@ -10,7 +10,7 @@ target_include_directories(mlir_mracle_io PUBLIC
 )
 
 target_link_libraries(mlir_mracle_io PUBLIC
-    mlir_mracle_context
+    mlir_mracle_core
     llvm_mlir_headers
     LLVMCore
     LLVMSupport

@@ -1,15 +1,13 @@
 #pragma once
 
+#include "mlir-mracle/core/types.h"
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
 #include <random>
-
-namespace mlir_mracle {
-enum class OutcomeRelation;
-}
 
 namespace mlir {
 namespace metamorphic {

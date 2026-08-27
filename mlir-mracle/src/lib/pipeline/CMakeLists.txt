@@ -22,6 +22,7 @@ target_link_libraries(mlir_mracle_pipeline PUBLIC
     mlir_mracle_io
     mlir_mracle_backend
     mlir_mracle_passes
+    mlir_mracle_core
     mlir_mracle_context
     llvm_mlir_headers
     MLIRIR

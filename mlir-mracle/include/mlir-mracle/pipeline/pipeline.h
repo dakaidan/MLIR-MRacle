@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mlir-mracle/context/context.h"
+#include "mlir-mracle/core/types.h"
 
 #include <string>
 #include <vector>

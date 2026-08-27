@@ -15,7 +15,7 @@ find_package(OpenMP REQUIRED)
 target_link_libraries(mlir_mracle_oracle PUBLIC
     Threads::Threads
     OpenMP::OpenMP_CXX
-    mlir_mracle_context
+    mlir_mracle_core
 )
 
 # The test includes oracle.cpp (see the #include in the test) so the static
@@ -27,6 +27,6 @@ set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_STANDARD 23)
 set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET mlir_mracle_oracle_test PROPERTY CXX_EXTENSIONS OFF)
 
-target_link_libraries(mlir_mracle_oracle_test PRIVATE MLIRMRACLE::mlir_mracle_context)
+target_link_libraries(mlir_mracle_oracle_test PRIVATE MLIRMRACLE::mlir_mracle_core)
 
 add_test(NAME oracle_test COMMAND mlir_mracle_oracle_test)

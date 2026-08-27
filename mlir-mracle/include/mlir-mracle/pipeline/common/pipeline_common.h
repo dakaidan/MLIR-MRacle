@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlir-mracle/context/context.h"
 #include "mlir-mracle/pipeline/pipeline.h"
 
 #include "mlir/IR/BuiltinOps.h"

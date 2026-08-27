@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlir-mracle/core/types.h"
 #include "mlir-mracle/execution/execution.h"
 
 #include <cstdint>

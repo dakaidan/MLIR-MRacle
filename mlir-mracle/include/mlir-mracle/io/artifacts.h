@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mlir-mracle/context/context.h"
+#include "mlir-mracle/core/types.h"
 #include "mlir-mracle/io/io.h"
 
 #include <string>

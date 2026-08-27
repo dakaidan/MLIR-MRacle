@@ -1,3 +1,4 @@
+add_subdirectory(core)
 add_subdirectory(backend)
 add_subdirectory(passes)
 add_subdirectory(context)
@@ -20,6 +21,7 @@ target_include_directories(mlir_mracle INTERFACE
 )
 
 target_link_libraries(mlir_mracle INTERFACE
+    mlir_mracle_core
     mlir_mracle_backend
     mlir_mracle_passes
     mlir_mracle_context

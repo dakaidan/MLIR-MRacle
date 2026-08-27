@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mlir-mracle/agitation/agitation.h"
-#include "mlir-mracle/context/context.h"
+#include "mlir-mracle/core/types.h"
 
 #include "llvm/IR/Module.h"
 
