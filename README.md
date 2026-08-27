@@ -54,8 +54,6 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 
 ## Architecture
 
-A run flows through five stages:
-
 ```mermaid
 flowchart LR
     A[Parse MLIR and clone] --> B[Apply metamorphic transforms]
