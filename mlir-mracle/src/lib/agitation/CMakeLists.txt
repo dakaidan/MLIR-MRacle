@@ -10,7 +10,6 @@ target_include_directories(mlir_mracle_agitation PUBLIC
 )
 
 target_link_libraries(mlir_mracle_agitation PUBLIC
-    mlir_mracle_jit
     mlir_mracle_context
     llvm_mlir_headers
     LLVMCore

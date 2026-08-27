@@ -160,7 +160,6 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     execOpts.seed = static_cast<uint32_t>(seed);
     execOpts.runsPerBinary = opts.reps;
     execOpts.singleThreadRuns = kDeterminismReps;
-    execOpts.compile.shuffleSeed = static_cast<uint32_t>(seed);
     ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
                                                execOpts);
     if (!exec.error.empty()) {

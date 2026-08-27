@@ -11,6 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BINARY_NAME = "mlir_mracle_opt"
 CACHE_DIR = PROJECT_ROOT / "cache"
+
 # stderr markers that indicate a TSan report on the tool or the JIT'd code
 SANITIZER_PATTERNS = [
     r"WARNING: ThreadSanitizer",
@@ -35,19 +36,14 @@ def build_dir_for():
         return Path(env)
     return PROJECT_ROOT / "build"
 
-
-# canonical location of the built tool; the runner builds it on first use
-def binary_path():
-    return build_dir_for() / "mlir-mracle" / "src" / "app" / BINARY_NAME
-
-
+# returns the built binary if present and executable, else None
 def find_binary():
-    path = binary_path()
+    path = build_dir_for() / "mlir-mracle" / "src" / "app" / BINARY_NAME
     if path.is_file() and os.access(path, os.X_OK):
         return path
     return None
 
-
+# builds the binary and returns its path, or exits on failure
 def build_binary():
     cmake = shutil.which("cmake")
     if not cmake:
@@ -88,6 +84,8 @@ def save_sanitizer_log(campaign_dir, stderr_text):
 
 
 def main():
+
+    # argument parsing
     parser = argparse.ArgumentParser(
         description="Run the mlir_mracle-opt metamorphic pass pipeline."
     )
@@ -134,9 +132,8 @@ def main():
     )
     parser.add_argument(
         "--threshold", type=int, default=5,
-        help="fail threshold: an outcome rare in the source (below this %% of "
-             "its runs) appearing at/above this %% of transformed runs FAILs; "
-             "other rate deviations beyond the Poisson bound WARN (default 5)"
+        help="if an outcome (both source and transformed) is missing in more than this %% of the "
+             "runs, the run is considered a failure "
     )
     parser.add_argument(
         "--reruns", type=int, default=5000,
@@ -149,6 +146,7 @@ def main():
     )
     args = parser.parse_args()
 
+    # flag logic checks
     if args.file and args.multi:
         sys.exit("Cannot specify both FILE and --multi.")
     if not args.file and not args.multi:
@@ -168,8 +166,11 @@ def main():
                      "legacy, or compare)")
         if name not in modes:
             modes.append(name)
+
+    # default to compare mode if none specified
     if not modes:
         modes.append("compare")
+
     if "emit" in modes and not args.transform:
         sys.exit("--mode=emit requires --transform.")
 
@@ -178,6 +179,7 @@ def main():
         print(f"{BINARY_NAME} not found; building...", file=sys.stderr)
         binary = build_binary()
 
+    # run the binary with the provided arguments
     cmd = [str(binary)]
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
@@ -189,6 +191,7 @@ def main():
     cmd.append(f"--threshold={args.threshold}")
     cmd.append(f"--reruns={args.reruns}")
     cmd.append(f"--max-runs={args.max_runs}")
+
     transforms = []
     for value in args.transform:
         transforms.extend(
@@ -218,6 +221,7 @@ def main():
         sys.stderr.write(result.stderr)
         sys.exit(result.returncode)
 
+    # parse the campaign dirs from stdout and save any sanitizer logs
     campaign_dirs = [ln for ln in result.stdout.splitlines() if ln.strip()]
     if len(campaign_dirs) != len(modes):
         sys.stderr.write(result.stderr)
@@ -227,6 +231,7 @@ def main():
     for campaign_dir in campaign_dirs:
         save_sanitizer_log(campaign_dir, result.stderr)
 
+    # count the outcomes of the runs in each campaign dir
     ok = warn = fail = 0
     emitted = emit_errors = 0
     for mode, campaign_dir in zip(modes, campaign_dirs):
@@ -256,6 +261,7 @@ def main():
                 else:
                     ok += 1
 
+    # terminal output summary
     print("=== Campaign completed ===")
     if emitted or emit_errors:
         print(f"Emitted MLIR: {emitted}  Errors: {emit_errors}")

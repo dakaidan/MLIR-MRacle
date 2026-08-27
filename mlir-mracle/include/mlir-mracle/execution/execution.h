@@ -53,10 +53,15 @@ struct ExecutionOptions {
     int singleThreadRuns = 32;
     // Number of distinct random OpenMP configs per binary.
     int configCount = 5;
-    // OMP_DYNAMIC is read only at OpenMP runtime initialisation, so it is
-    // pinned once process-wide (see applyProcessSettings); per-config
-    // variation uses omp_set_num_threads only.
-    CompileOptions compile;
+};
+
+// A compiled, in-memory binary produced from a source module: the callable
+// runs the module's parallel main and returns its scalar results.
+struct CompiledBinary {
+    std::string side; // "source" | "transformed"
+    int compileIndex = 0;
+    int jitOptLevel = -1;
+    std::function<std::vector<int64_t>()> fn;
 };
 
 struct ExecutionResult {

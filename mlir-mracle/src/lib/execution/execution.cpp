@@ -4,8 +4,10 @@
 
 #include "llvm/Transforms/Utils/Cloning.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <map>
+#include <random>
 #include <utility>
 
 #include <omp.h>
@@ -15,7 +17,7 @@ namespace mlir_mracle {
 namespace {
 
 void applyConfig(const AgitationConfig &cfg) {
-    omp_set_num_threads(cfg.omp.numThreads);
+    omp_set_num_threads(cfg.numThreads);
 }
 
 BinaryExecutionResult runBinary(const CompiledBinary &binary,
@@ -25,7 +27,7 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
     result.binaryIndex = binaryIndex;
     result.side = binary.side;
 
-    AgitationConfig single{{1}, singleThreadRuns};
+    AgitationConfig single{1, singleThreadRuns};
     applyConfig(single);
     result.singleThread = collectOutcomeSet(binary.fn, singleThreadRuns, 1);
 
@@ -35,12 +37,52 @@ BinaryExecutionResult runBinary(const CompiledBinary &binary,
         cfgResult.configIndex = static_cast<int>(i);
         cfgResult.config = configs[i];
         cfgResult.outcomes = collectOutcomeSet(binary.fn, configs[i].runs,
-                                               configs[i].omp.numThreads);
+                                               configs[i].numThreads);
         result.threadedTotal =
             mergeOutcomeSets(result.threadedTotal, cfgResult.outcomes);
         result.perConfig.push_back(std::move(cfgResult));
     }
     return result;
+}
+
+// Builds the in-memory binary set for one side: five clones, each perturbed
+// from the seed and compiled at a CodeGen opt level from {0, 1, 2, 3}. With
+// five binaries all four levels appear, so the sweep never misses a code
+// generator; the order is shuffled from the seed so both sides compile with
+// the same sequence.
+std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
+                                             uint32_t seed, std::string side,
+                                             std::string *error) {
+    if (error)
+        error->clear();
+
+    constexpr int kBinaryCount = 5;
+    std::vector<int> levels;
+    levels.reserve(kBinaryCount);
+    for (int i = 0; i < kBinaryCount; ++i)
+        levels.push_back(i % 4);
+    std::mt19937 optRng(seed);
+    std::shuffle(levels.begin(), levels.end(), optRng);
+
+    std::vector<CompiledBinary> out;
+    for (int i = 0; i < kBinaryCount; ++i) {
+        int optLevel = levels[i];
+        auto clone = llvm::CloneModule(module);
+        perturbBasicBlocks(*clone,
+                           seed + static_cast<uint32_t>(i) * 2654435761u);
+
+        std::string err;
+        auto fn = compileLLVMModuleToFunction(std::move(clone), &err,
+                                              /*enableTsan=*/false, optLevel,
+                                              llvm::BasicBlockSection::All);
+        if (!fn) {
+            if (error)
+                *error = err;
+            break;
+        }
+        out.push_back({side, i, optLevel, std::move(fn)});
+    }
+    return out;
 }
 
 } // namespace
@@ -156,10 +198,10 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
 
     applyProcessSettings();
 
-    result.sourceBinaries = compileBinarySet(sourceModule, opts.compile,
-                                             "source", &result.error);
-    result.transformedBinaries = compileBinarySet(transformedModule,
-                                                  opts.compile, "transformed",
+    result.sourceBinaries = compileBinarySet(sourceModule, opts.seed, "source",
+                                             &result.error);
+    result.transformedBinaries = compileBinarySet(transformedModule, opts.seed,
+                                                  "transformed",
                                                   &result.error);
     if (result.sourceBinaries.empty() && result.transformedBinaries.empty())
         return result;
@@ -213,7 +255,7 @@ void rerunAllBinaries(ExecutionResult &exec, int extraRuns,
         for (const auto &cfg : runConfigs) {
             applyConfig(cfg);
             ObservedOutcomeSet extraSet = collectOutcomeSet(
-                binaries[b]->fn, cfg.runs, cfg.omp.numThreads);
+                binaries[b]->fn, cfg.runs, cfg.numThreads);
             br.threadedTotal =
                 mergeOutcomeSets(br.threadedTotal, extraSet);
         }

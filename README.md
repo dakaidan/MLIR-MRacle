@@ -31,7 +31,7 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 │   └── src/
 │       ├── app/               # mlir_mracle_opt CLI driver
 │       └── lib/
-│           ├── agitation/     # agitates compiled variants across codegen and runtime parameters
+│           ├── agitation/     # perturbs modules (basic-block layout) and generates runtime configs
 │           ├── backend/
 │           │   ├── jit/       # JIT-compiles LLVM modules for execution
 │           │   └── lowering/  # lowers MLIR to LLVM IR
@@ -242,13 +242,12 @@ requested `--model` matches.
 
 The agitation sweep perturbs execution across codegen and runtime axes to widen the set of observable outcomes and surface rare interleavings.
 
-Each LLVM module is compiled into `binaryCount` (default 5) in-memory JIT
-variants and run under `configCount` (default 5) OpenMP team-size configs.
+Each LLVM module is compiled into 5 in-memory JIT variants and run under
+`configCount` (default 5) OpenMP team-size configs.
 
 - **Codegen axis** — each variant clones the module and shuffles non-entry
-  basic blocks; CodeGen opt levels use all of `{0,1,2,3}` when
-  `binaryCount >= 4`. On ELF, per-BB sections preserve the shuffled layout in
-  machine code.
+  basic blocks; CodeGen opt levels use all of `{0,1,2,3}`. On ELF, per-BB
+  sections preserve the shuffled layout in machine code.
 - **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
   replacement.
 - **Replay rounds** — rare states re-run with fresh team-size mixes, without

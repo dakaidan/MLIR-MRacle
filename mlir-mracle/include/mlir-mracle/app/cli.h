@@ -7,9 +7,9 @@
 
 namespace mlir_mracle {
 
-// pipeline selectable via --mode; every requested mode runs in order
+// pipeline chosen via --mode
 enum class PipelineMode {
-    Emit,    // --mode=emit: transform and emit MLIR only
+    Emit,    // --mode=emit: transform and emit MLIR
     Execute, // --mode=execution: execute each file as-is
     Legacy,  // --mode=legacy: legacy thread-group oracle pipeline
     Compare, // --mode=compare: default agitation-sweep oracle pipeline
@@ -20,10 +20,7 @@ struct CliOptions {
     std::vector<PipelineMode> modes;
 };
 
-// Parses and validates every --... flag. Recognised flags are consumed and
-// compacted out of argv (leftover arguments shift to the front, argc is
-// reduced). On invalid input the historic error text is printed to stderr and
-// the process exits with 1.
+// Parses and validates every binary option flag and returns a CliOptions struct
 CliOptions parsePipelineOptions(int &argc, char **argv);
 
 } // namespace mlir_mracle
