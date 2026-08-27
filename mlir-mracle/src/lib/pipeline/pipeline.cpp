@@ -23,18 +23,13 @@ VerdictIssue failIssue(const std::string &reason) {
     return issue;
 }
 
-// converts one per-binary execution result plus its compiled binary into the
-// concise breakdown appended to run_info.json
-BinaryOutcomeResult toBinaryOutcomeResult(const BinaryExecutionResult &br,
-                                          const CompiledBinary &bin) {
-    BinaryOutcomeResult bo;
-    bo.side = br.side;
-    bo.compileIndex = bin.compileIndex;
-    bo.jitOptLevel = bin.jitOptLevel;
-    bo.runs = static_cast<int>(br.threadedTotal.totalRuns);
-    bo.outcomes = br.threadedTotal.outcomes;
-    bo.counts = br.threadedTotal.counts;
-    return bo;
+// converts a compiled binary's accumulated outcomes into the concise
+// breakdown appended to run_info.json
+BinaryOutcomeSummary toBinaryOutcomeSummary(const CompiledBinary &bin) {
+    BinaryOutcomeSummary summary;
+    summary.identity = bin.identity;
+    summary.observed = bin.threadedTotal;
+    return summary;
 }
 
 // fills the run-level union outcome sets and the per-binary breakdown from
@@ -48,15 +43,10 @@ void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
     info.transformedOutcomes = std::move(exec.transformedTotal.outcomes);
     info.transformedCounts = std::move(exec.transformedTotal.counts);
 
-    int srcCount = static_cast<int>(exec.sourceBinaries.size());
-    for (size_t i = 0; i < exec.binaryResults.size(); ++i) {
-        const auto &br = exec.binaryResults[i];
-        const CompiledBinary &bin =
-            static_cast<int>(i) < srcCount
-                ? exec.sourceBinaries[i]
-                : exec.transformedBinaries[i - srcCount];
-        info.binaryOutcomes.push_back(toBinaryOutcomeResult(br, bin));
-    }
+    for (const auto &bin : exec.sourceBinaries)
+        info.binaryOutcomes.push_back(toBinaryOutcomeSummary(bin));
+    for (const auto &bin : exec.transformedBinaries)
+        info.binaryOutcomes.push_back(toBinaryOutcomeSummary(bin));
 }
 
 // replays rare states in rounds of --reruns extra source runs per binary

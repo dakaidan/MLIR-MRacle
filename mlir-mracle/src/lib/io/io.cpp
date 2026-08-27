@@ -389,12 +389,12 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
     JsonValue binaries = jsonArray();
     for (const auto &b : info.binaryOutcomes) {
         JsonValue entry = jsonObject();
-        jsonPut(entry, "side", jsonString(b.side));
-        jsonPut(entry, "compile_index", jsonInt(b.compileIndex));
-        jsonPut(entry, "jit_opt_level", jsonInt(b.jitOptLevel));
-        jsonPut(entry, "runs", jsonInt(b.runs));
+        jsonPut(entry, "side", jsonString(b.identity.side));
+        jsonPut(entry, "compile_index", jsonInt(b.identity.compileIndex));
+        jsonPut(entry, "jit_opt_level", jsonInt(b.identity.jitOptLevel));
+        jsonPut(entry, "runs", jsonInt(b.observed.totalRuns));
         jsonPut(entry, "outcomes",
-                outcomeListToJson(b.outcomes, b.counts));
+                outcomeListToJson(b.observed.outcomes, b.observed.counts));
         jsonPush(binaries, std::move(entry));
     }
     jsonPut(obj, "binary_results", std::move(binaries));

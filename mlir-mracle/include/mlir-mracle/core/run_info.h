@@ -25,14 +25,10 @@ struct ThreadGroupResult {
     OutcomeSetResult outcomeSet;
 };
 
-// Outcomes observed for a single compiled binary during an agitation sweep
-struct BinaryOutcomeResult {
-    std::string side;      // "source" | "transformed"
-    int compileIndex = 0;  // index within the side's binary set
-    int jitOptLevel = -1;  // CodeGen opt level used for this binary
-    int runs = 0;          // executions represented by outcomes/counts
-    std::vector<JointOutcome> outcomes;
-    std::vector<int64_t> counts;
+// Concise per-binary breakdown appended to run_info.json
+struct BinaryOutcomeSummary {
+    BinaryIdentity identity;
+    ObservedOutcomeSet observed;
 };
 
 // Main data object about a single run of the metamorphic testing pipeline.
@@ -55,7 +51,7 @@ struct RunInfo {
     std::vector<int64_t> sourceCounts;
     std::vector<JointOutcome> transformedOutcomes;
     std::vector<int64_t> transformedCounts;
-    std::vector<BinaryOutcomeResult> binaryOutcomes;
+    std::vector<BinaryOutcomeSummary> binaryOutcomes;
 
     OutcomeRelation relation = OutcomeRelation::Equality;
     std::string error;
