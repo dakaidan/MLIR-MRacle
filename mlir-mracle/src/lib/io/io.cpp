@@ -289,38 +289,23 @@ JsonValue threadResultToJson(const ThreadGroupResult &tg) {
     jsonPut(entry, "transformed_runs", jsonInt(tg.transformedRuns));
     jsonPut(entry, "outcome_set", outcomeSetResultToJson(tg.outcomeSet));
     JsonValue issues = jsonArray();
-    if (!tg.issues.empty()) {
-        for (const auto &issue : tg.issues)
-            jsonPush(issues, issueToJson(issue));
-    } else if (tg.status != "OK") {
-        // legacy runs carry only the joined message; derive a single issue
-        VerdictIssue issue;
-        issue.severity =
-            tg.status == "ERROR" ? IssueSeverity::Fail : IssueSeverity::Warn;
-        issue.reason = tg.message;
+    for (const auto &issue : tg.issues)
         jsonPush(issues, issueToJson(issue));
-    }
     if (!issues.array.empty())
         jsonPut(entry, "issues", std::move(issues));
     return entry;
 }
 
 // structured FAIL/WARN issues for a run, FAIL before WARN. The default
-// pipeline copies the oracle's issues into RunInfo; legacy runs have none,
-// so they fall back to deriving issues from thread results / error / warn.
+// pipeline copies the oracle's issues into RunInfo; legacy runs only fill
+// per-thread-group issues, so they are collected from thread results.
 std::vector<VerdictIssue> collectRunIssues(const RunInfo &info) {
     if (!info.issues.empty())
         return info.issues;
     std::vector<VerdictIssue> issues;
-    for (const auto &tg : info.threadResults) {
-        if (tg.status == "OK")
-            continue;
-        VerdictIssue issue;
-        issue.severity =
-            tg.status == "ERROR" ? IssueSeverity::Fail : IssueSeverity::Warn;
-        issue.reason = tg.message;
-        issues.push_back(std::move(issue));
-    }
+    for (const auto &tg : info.threadResults)
+        for (const auto &issue : tg.issues)
+            issues.push_back(issue);
     if (!info.error.empty())
         issues.push_back({IssueSeverity::Fail, "", info.error});
     if (!info.warn.empty())

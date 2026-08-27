@@ -25,9 +25,9 @@ ObservedOutcomeSet makeSet(
 int failures = 0;
 
 void expect(const char *name, const CompareResult &r, bool ok, bool warn) {
-    bool pass = r.ok == ok && r.warn == warn;
+    bool pass = r.ok() == ok && r.warn() == warn;
     std::printf("[%s] %-38s ok=%d warn=%d msg=\"%s\"\n", pass ? "PASS" : "FAIL",
-                name, r.ok, r.warn, r.message.c_str());
+                name, r.ok(), r.warn(), r.message().c_str());
     if (!pass)
         ++failures;
 }

@@ -57,11 +57,11 @@ void expectVerdict(const char *name, const StateVerdict &v, bool fail,
 
 void expectResult(const char *name, const OracleResult &r, bool ok,
                   bool warn, bool needsRerun) {
-    bool pass =
-        r.compare.ok == ok && r.compare.warn == warn && r.needsRerun == needsRerun;
+    bool pass = r.compare.ok() == ok && r.compare.warn() == warn &&
+                r.needsRerun == needsRerun;
     std::printf("[%s] %-42s ok=%d warn=%d rerun=%d msg=\"%s\"\n",
-                pass ? "PASS" : "FAIL", name, r.compare.ok, r.compare.warn,
-                r.needsRerun, r.compare.message.c_str());
+                pass ? "PASS" : "FAIL", name, r.compare.ok(), r.compare.warn(),
+                r.needsRerun, r.compare.message().c_str());
     if (!pass)
         ++failures;
 }
@@ -312,7 +312,7 @@ int main() {
         auto r = oracleCompare(exec, opts);
         expectResult("equality novel value post-replay", r, true, true, false);
         expectMessageContains("equality novel value message",
-                              r.compare.message, "novel value: var0=3");
+                              r.compare.message(), "novel value: var0=3");
         expectIssue("equality novel value issue", r,
                     mlir_mracle::IssueSeverity::Warn, "novel value", "var0=3");
     }
@@ -343,10 +343,10 @@ int main() {
         auto r = oracleCompare(exec, opts);
         expectResult("equality fail plus warn", r, false, false, false);
         expectMessageContains("equality fail plus warn rate shift",
-                              r.compare.message,
+                              r.compare.message(),
                               "rate shift on shared outcome: [2]");
         expectMessageContains("equality fail plus warn novel",
-                              r.compare.message, "novel outcome: [3]");
+                              r.compare.message(), "novel outcome: [3]");
         expectIssue("equality fail plus warn rate shift issue", r,
                     mlir_mracle::IssueSeverity::Fail,
                     "rate shift on shared outcome", "[2]");
@@ -366,7 +366,7 @@ int main() {
         auto r = oracleCompare(exec, opts);
         expectResult("equality pending lists warn", r, true, false, true);
         expectMessageContains("equality pending lists warn message",
-                              r.compare.message,
+                              r.compare.message(),
                               "rate shift on shared outcome: [2]");
     }
 
@@ -381,7 +381,7 @@ int main() {
         auto r = oracleCompare(exec, opts);
         expectResult("equality shared rate warn", r, true, true, false);
         expectMessageContains("equality shared rate warn message",
-                              r.compare.message,
+                              r.compare.message(),
                               "rate shift on shared outcome: [2]");
     }
 
@@ -433,7 +433,7 @@ int main() {
         auto r3 = oracleCompare(exec3, opts);
         expectResult("subset novel value post-replay", r3, true, true, false);
         expectMessageContains("subset novel value message",
-                              r3.compare.message, "novel value: var0=3");
+                              r3.compare.message(), "novel value: var0=3");
     }
 
     // superset relation: transformed must keep every source outcome

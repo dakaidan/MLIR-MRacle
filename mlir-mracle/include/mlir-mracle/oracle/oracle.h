@@ -32,7 +32,7 @@ struct OracleResult {
     // replay round (a novel outcome set or a Poisson-significant missing
     // source state) before the final verdict; never set on the final
     // post-replay call. Novel values warn directly but still keep the
-    // replay loop going through compare.warn.
+    // replay loop going through compare.warn().
     bool needsRerun = false;
 };
 

@@ -1,6 +1,8 @@
 #pragma once
 
+#include "mlir-mracle/core/run_info.h"
 #include "mlir-mracle/core/types.h"
+#include "mlir-mracle/execution/execution.h"
 
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/IR/Module.h"

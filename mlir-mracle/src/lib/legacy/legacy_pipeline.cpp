@@ -41,8 +41,8 @@ static ThreadGroupResult threadResultFromCompare(
     OutcomeSetResult outcomeSet) {
     ThreadGroupResult tg;
     tg.numThreads = t;
-    tg.status = statusFromVerdict(cmp.ok, cmp.warn);
-    tg.message = cmp.message;
+    tg.status = statusFromVerdict(cmp.ok(), cmp.warn());
+    tg.message = cmp.message();
     tg.issues = cmp.issues;
     tg.originalRuns = srcRuns;
     tg.transformedRuns = trRuns;
@@ -273,9 +273,9 @@ RunInfo runLegacySingle(const std::string &inputFile, int seed,
         // poisoned baseline cannot warn before it has been checked. Only a
         // warn that survives the extra source data stands; a re-judge that
         // flips to a fail is reported as such.
-        if (cmp.warn && t != 1 && memo.warnCount < kBaselineWarnLimit) {
+        if (cmp.warn() && t != 1 && memo.warnCount < kBaselineWarnLimit) {
             verified = true;
-            while (cmp.warn && srcRuns < maxSourceReps) {
+            while (cmp.warn() && srcRuns < maxSourceReps) {
                 int extra = std::min(retestReps, maxSourceReps - srcRuns);
                 ObservedOutcomeSet extraSet =
                     collectOutcomeSet(origFn, extra, t);
@@ -294,13 +294,13 @@ RunInfo runLegacySingle(const std::string &inputFile, int seed,
         setup.runInfo.threadResults.push_back(threadResultFromCompare(
             t, cmp, srcRuns, trSet.totalRuns, std::move(outcomeSet)));
 
-        if (!cmp.ok) {
+        if (!cmp.ok()) {
             setup.runInfo.error =
-                "threads=" + std::to_string(t) + ": " + cmp.message;
+                "threads=" + std::to_string(t) + ": " + cmp.message();
             break;
         }
-        if (cmp.warn)
-            setup.runInfo.warn = cmp.message;
+        if (cmp.warn())
+            setup.runInfo.warn = cmp.message();
     }
 
     // commit the deferred baseline writes when the run is OK; a run that

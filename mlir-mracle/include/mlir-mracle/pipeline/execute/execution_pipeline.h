@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/pipeline/pipeline.h"
 
 namespace mlir_mracle {

@@ -139,13 +139,11 @@ OracleResult oracleCompare(const ExecutionResult &exec,
     const ObservedOutcomeSet &tr = exec.transformedTotal;
 
     if (!arityCompatible(src, tr)) {
-        out.compare = {false, false,
-                       "FAIL: result arity mismatch: source arity " +
-                           std::to_string(src.arity) +
-                           " vs transformed arity " +
-                           std::to_string(tr.arity)};
         out.compare.issues.push_back(
-            {IssueSeverity::Fail, "", "result arity mismatch"});
+            {IssueSeverity::Fail, "",
+             "result arity mismatch: source arity " +
+                 std::to_string(src.arity) +
+                 " vs transformed arity " + std::to_string(tr.arity)});
         return out;
     }
 
@@ -157,7 +155,6 @@ OracleResult oracleCompare(const ExecutionResult &exec,
                        trST.outcomes.size() == 1 &&
                        srcST.outcomes.front() == trST.outcomes.front();
     if (!singleMatch) {
-        out.compare = {false, false, "FAIL: single-thread determinism mismatch"};
         out.compare.issues.push_back(
             {IssueSeverity::Fail, "", "single-thread determinism mismatch"});
         return out;
@@ -172,7 +169,6 @@ OracleResult oracleCompare(const ExecutionResult &exec,
                         src.outcomes.begin(), src.outcomes.end(),
                         std::back_inserter(transformedOnly));
 
-    std::vector<std::string> failReasons;
     std::vector<std::string> warnReasons;
     std::vector<std::string> rerunReasons;
     std::vector<VerdictIssue> failIssues;
@@ -184,7 +180,6 @@ OracleResult oracleCompare(const ExecutionResult &exec,
         if (v.fail) {
             issue.severity = IssueSeverity::Fail;
             failIssues.push_back(std::move(issue));
-            failReasons.push_back(std::move(what));
         } else if (v.warn) {
             issue.severity = IssueSeverity::Warn;
             warnIssues.push_back(std::move(issue));
@@ -250,10 +245,7 @@ OracleResult oracleCompare(const ExecutionResult &exec,
 
     // the message names every warn/fail-worthy set, including rate-shifted
     // shared sets, so a hard fail also reports the states that merely warn
-    if (!failReasons.empty()) {
-        std::vector<std::string> all = failReasons;
-        all.insert(all.end(), warnReasons.begin(), warnReasons.end());
-        out.compare = {false, false, joinReasons(all)};
+    if (!failIssues.empty()) {
         out.compare.issues = failIssues;
         out.compare.issues.insert(out.compare.issues.end(),
                                   warnIssues.begin(), warnIssues.end());
@@ -262,18 +254,15 @@ OracleResult oracleCompare(const ExecutionResult &exec,
     if (!rerunReasons.empty()) {
         std::vector<std::string> all = rerunReasons;
         all.insert(all.end(), warnReasons.begin(), warnReasons.end());
-        out.compare = {true, false,
-                       "rare outcome present; replay pending: " +
-                           joinReasons(all)};
+        out.compare.note =
+            "rare outcome present; replay pending: " + joinReasons(all);
         out.needsRerun = true;
         return out;
     }
     if (!warnReasons.empty()) {
-        out.compare = {true, true, joinReasons(warnReasons)};
         out.compare.issues = warnIssues;
         return out;
     }
-    out.compare = {true, false, ""};
     return out;
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlir-mracle/core/run_info.h"
 #include "mlir-mracle/core/types.h"
 
 #include "mlir/IR/MLIRContext.h"

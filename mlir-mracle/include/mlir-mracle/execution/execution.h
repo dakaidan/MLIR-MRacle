@@ -121,4 +121,24 @@ bool runTsanTriage(const llvm::Module &sourceModule,
 std::vector<const CompiledBinary *>
 collectAllBinaries(const ExecutionResult &exec);
 
+// outcomes observed at one OpenMP team size in execution mode
+struct ExecutionThreadResult {
+    int numThreads = 0;
+    int runs = 0;
+    std::vector<JointOutcome> outcomes; // sorted unique joint outcomes
+    std::vector<int64_t> counts;        // occurrences per outcome, parallel
+};
+
+// one execution-mode run of a single source file; kept separate from RunInfo
+// because execution mode has no transforms, comparison, or status classes
+struct ExecutionRunResult {
+    int runNumber = 0;
+    std::string file;
+    int seed = 42;
+    std::vector<ExecutionThreadResult> threadResults;
+    // LLVM IR of the lowered source program; saved as the run's .ll artifact
+    std::string llvmIR;
+    std::string error;
+};
+
 } // namespace mlir_mracle

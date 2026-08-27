@@ -74,7 +74,7 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
     int64_t binaryCount =
         std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
     int replayRound = 0;
-    while ((verdict.needsRerun || verdict.compare.warn) &&
+    while ((verdict.needsRerun || verdict.compare.warn()) &&
            exec.sourceTotal.totalRuns < opts.maxSourceReps) {
         int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
         int extra = static_cast<int>(std::min<int64_t>(
@@ -178,10 +178,10 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     populateRunInfoFromExecution(setup.runInfo, exec);
 
     setup.runInfo.issues = verdict.compare.issues;
-    if (!verdict.compare.ok)
-        setup.runInfo.error = verdict.compare.message;
-    else if (verdict.compare.warn)
-        setup.runInfo.warn = verdict.compare.message;
+    if (!verdict.compare.ok())
+        setup.runInfo.error = verdict.compare.message();
+    else if (verdict.compare.warn())
+        setup.runInfo.warn = verdict.compare.message();
     return setup.runInfo;
 }
 
