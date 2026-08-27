@@ -175,21 +175,24 @@ void printJson(const JsonValue &val, llvm::raw_ostream &os) {
 
 JsonValue jointOutcomeToJson(const JointOutcome &o) {
     JsonValue arr = jsonArray();
+
     for (int64_t v : o)
         jsonPush(arr, jsonInt(v));
+
     return arr;
 }
 
 JsonValue outcomeListToJson(const std::vector<JointOutcome> &outcomes,
                             const std::vector<int64_t> &counts) {
     JsonValue arr = jsonArray();
+
     for (size_t i = 0; i < outcomes.size(); ++i) {
         JsonValue entry = jsonObject();
         jsonPut(entry, "outcome", jointOutcomeToJson(outcomes[i]));
-        jsonPut(entry, "count",
-                jsonInt(i < counts.size() ? counts[i] : 1));
+        jsonPut(entry, "count", jsonInt(i < counts.size() ? counts[i] : 1));
         jsonPush(arr, std::move(entry));
     }
+
     return arr;
 }
 
@@ -209,30 +212,39 @@ bool observedOutcomeSetFromJson(const llvm::json::Object &o,
     // treated as a cache miss rather than being silently reinterpreted
     if (auto v = o.getInteger("version"); !v || *v != 1)
         return false;
+
     const llvm::json::Array *arr = o.getArray("outcomes");
     if (!arr)
         return false;
+
     for (const auto &cv : *arr) {
         const auto *obj = cv.getAsObject();
+
         if (!obj)
             return false;
+
         const llvm::json::Array *va = obj->getArray("outcome");
         if (!va)
             return false;
+
         JointOutcome jo;
         for (const auto &ev : *va)
             if (auto v = ev.getAsInteger())
                 jo.push_back(static_cast<int64_t>(*v));
+
         set.outcomes.push_back(std::move(jo));
         if (auto c = obj->getInteger("count"))
             set.counts.push_back(*c);
         else
             set.counts.push_back(1);
     }
+
     if (auto a = o.getInteger("arity"))
         set.arity = static_cast<size_t>(*a);
+
     if (auto b = o.getBoolean("arity_consistent"))
         set.arityConsistent = *b;
+
     if (auto t = o.getInteger("total_runs"))
         set.totalRuns = *t;
     return true;
@@ -252,31 +264,37 @@ namespace {
 
 JsonValue requestedTransformsToJson(const RunInfo &info) {
     JsonValue arr = jsonArray();
+
     if (info.requestedTransforms.empty())
         jsonPush(arr, jsonString("all"));
     else
         for (const auto &r : info.requestedTransforms)
             jsonPush(arr, jsonString(r));
+
     return arr;
 }
 
 JsonValue appliedTransformsToJson(
     const std::vector<AppliedTransformation> &applied) {
     JsonValue arr = jsonArray();
+
     for (const auto &at : applied) {
         JsonValue entry = jsonObject();
         jsonPut(entry, "name", jsonString(at.name));
         jsonPut(entry, "target_function", jsonString(at.targetFunction));
         jsonPush(arr, std::move(entry));
     }
+
     return arr;
 }
 
 JsonValue issueToJson(const VerdictIssue &issue) {
     JsonValue obj = jsonObject();
     jsonPut(obj, "status", jsonString(issueSeverityToString(issue.severity)));
+
     if (!issue.outcome.empty())
         jsonPut(obj, "outcome", jsonString(issue.outcome));
+
     jsonPut(obj, "reason", jsonString(issue.reason));
     return obj;
 }
@@ -288,28 +306,33 @@ JsonValue threadResultToJson(const ThreadGroupResult &tg) {
     jsonPut(entry, "source_runs", jsonInt(tg.originalRuns));
     jsonPut(entry, "transformed_runs", jsonInt(tg.transformedRuns));
     jsonPut(entry, "outcome_set", outcomeSetResultToJson(tg.outcomeSet));
+
     JsonValue issues = jsonArray();
     for (const auto &issue : tg.issues)
         jsonPush(issues, issueToJson(issue));
+
     if (!issues.array.empty())
         jsonPut(entry, "issues", std::move(issues));
+        
     return entry;
 }
 
-// structured FAIL/WARN issues for a run, FAIL before WARN. The default
-// pipeline copies the oracle's issues into RunInfo; legacy runs only fill
-// per-thread-group issues, so they are collected from thread results.
+// collecting the structured issues for a run and sorting by severity
 std::vector<VerdictIssue> collectRunIssues(const RunInfo &info) {
     if (!info.issues.empty())
         return info.issues;
+
     std::vector<VerdictIssue> issues;
     for (const auto &tg : info.threadResults)
         for (const auto &issue : tg.issues)
             issues.push_back(issue);
+
     if (!info.error.empty())
         issues.push_back({IssueSeverity::Fail, "", info.error});
+
     if (!info.warn.empty())
         issues.push_back({IssueSeverity::Warn, "", info.warn});
+
     std::stable_partition(issues.begin(), issues.end(),
                           [](const VerdictIssue &i) {
                               return i.severity == IssueSeverity::Fail;
@@ -323,9 +346,7 @@ JsonValue relationToJson(OutcomeRelation relation) {
     return obj;
 }
 
-// metadata fields shared by every run-info JSON representation; field order is
-// significant (ordered JsonValue), so per-representation fields must be
-// appended after this
+// convert metadata into metadata fields shared by every run-info JSON representation
 JsonValue runMetadataToJson(const RunInfo &info) {
     JsonValue obj = jsonObject();
     jsonPut(obj, "run", jsonInt(info.runNumber));
@@ -339,6 +360,7 @@ JsonValue runMetadataToJson(const RunInfo &info) {
     JsonValue issues = jsonArray();
     for (const auto &issue : collectRunIssues(info))
         jsonPush(issues, issueToJson(issue));
+
     if (!issues.array.empty())
         jsonPut(obj, "issues", std::move(issues));
 
@@ -359,9 +381,11 @@ std::string runStatusString(const RunInfo &info) {
     for (const auto &issue : collectRunIssues(info))
         if (issue.severity == IssueSeverity::Fail)
             return "ERROR";
+
     for (const auto &issue : collectRunIssues(info))
         if (issue.severity == IssueSeverity::Warn)
             return "WARN";
+
     return "OK";
 }
 
@@ -371,6 +395,7 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
     JsonValue threads = jsonArray();
     for (const auto &tg : info.threadResults)
         jsonPush(threads, threadResultToJson(tg));
+        
     jsonPut(obj, "thread_results", std::move(threads));
     return obj;
 }
@@ -387,6 +412,7 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
                               info.transformedCounts));
 
     JsonValue binaries = jsonArray();
+
     for (const auto &b : info.binaryOutcomes) {
         JsonValue entry = jsonObject();
         jsonPut(entry, "side", jsonString(b.identity.side));
@@ -397,6 +423,7 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
                 outcomeListToJson(b.observed.outcomes, b.observed.counts));
         jsonPush(binaries, std::move(entry));
     }
+
     jsonPut(obj, "binary_results", std::move(binaries));
     return obj;
 }
@@ -407,6 +434,7 @@ JsonValue executionRunToJson(const ExecutionRunResult &run) {
     jsonPut(obj, "file", jsonString(run.file));
     jsonPut(obj, "seed", jsonInt(run.seed));
     JsonValue threadResults = jsonArray();
+
     for (const auto &tr : run.threadResults) {
         JsonValue entry = jsonObject();
         jsonPut(entry, "threads", jsonInt(tr.numThreads));
@@ -414,9 +442,12 @@ JsonValue executionRunToJson(const ExecutionRunResult &run) {
         jsonPut(entry, "outcomes", outcomeListToJson(tr.outcomes, tr.counts));
         jsonPush(threadResults, std::move(entry));
     }
+
     jsonPut(obj, "thread_results", std::move(threadResults));
+
     if (!run.error.empty())
         jsonPut(obj, "error", jsonString(run.error));
+        
     return obj;
 }
 

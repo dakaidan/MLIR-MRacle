@@ -20,8 +20,7 @@ namespace mlir_mracle {
 std::string dumpMLIR(mlir::ModuleOp module);
 std::string dumpLLVM(llvm::Module &module);
 
-// ordered JSON value: object fields are emitted in insertion order so
-// user-facing output keeps a stable, explicit field layout
+// ordered JSON value for stable layout in result.json
 struct JsonValue {
     enum class Kind { Null, Bool, Int, Double, String, Array, Object };
     Kind kind = Kind::Null;
@@ -33,6 +32,7 @@ struct JsonValue {
     std::vector<std::pair<std::string, JsonValue>> object;
 };
 
+// JSON value constructors and accessors
 JsonValue jsonBool(bool v);
 JsonValue jsonInt(int64_t v);
 JsonValue jsonString(std::string v);
@@ -47,8 +47,7 @@ void printJson(const JsonValue &val, llvm::raw_ostream &os);
 // serializes a single observed outcome set (baseline cache payload)
 JsonValue observedOutcomeSetToJson(const ObservedOutcomeSet &set);
 
-// parses an observed outcome set from a JSON object; returns false on
-// malformed input
+// parses an observed outcome set from a JSON object
 bool observedOutcomeSetFromJson(const llvm::json::Object &o,
                                 ObservedOutcomeSet &set);
 
