@@ -53,7 +53,8 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
                            const PipelineOptions &opts,
                            OracleOptions oracleOpts,
                            const llvm::Module &sourceModule,
-                           const llvm::Module &transformedModule) {
+                           const llvm::Module &transformedModule,
+                           std::string &triageError) {
     OracleResult verdict = oracleCompare(exec, oracleOpts);
     int64_t binaryCount =
         std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
@@ -76,9 +77,14 @@ OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
     }
     // if the verdict is still inconclusive after the maxSourceReps cap
     // run a final TSan triage
-    if (verdict.needsRerun)
-        runTsanTriage(sourceModule, transformedModule, exec, opts.retestReps,
-                      static_cast<uint32_t>(seed) + 0x9e3779b9u, configCount);
+    if (verdict.needsRerun) {
+        std::string err;
+        if (!runTsanTriage(sourceModule, transformedModule, exec,
+                           opts.retestReps,
+                           static_cast<uint32_t>(seed) + 0x9e3779b9u,
+                           configCount, &err))
+            triageError = err;
+    }
     oracleOpts.postReruns = true;
     return oracleCompare(exec, oracleOpts);
 }
@@ -149,10 +155,18 @@ RunInfo runSingle(const std::string &inputFile, int seed,
     oracleOpts.relation = setup.runInfo.relation;
     oracleOpts.thresholdPct = opts.thresholdPct;
 
+    std::string triageError;
     OracleResult verdict = runReplayLoop(exec, seed, execOpts.configCount,
                                          opts, oracleOpts,
-                                         *sourceLLVM, *transformedLLVM);
+                                         *sourceLLVM, *transformedLLVM,
+                                         triageError);
     populateRunInfoFromExecution(setup.runInfo, exec);
+
+    if (!triageError.empty()) {
+        setup.runInfo.error = triageError;
+        setup.runInfo.issues.push_back(failIssue(triageError));
+        return setup.runInfo;
+    }
 
     setup.runInfo.issues = verdict.compare.issues;
 

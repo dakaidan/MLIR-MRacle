@@ -68,7 +68,7 @@ std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
 
         if (!fn) {
             if (error)
-                *error = err;
+                *error = "JIT compile error (" + side + "): " + err;
             break;
         }
 
@@ -189,15 +189,18 @@ ExecutionResult runExecutionHarness(const llvm::Module &sourceModule,
     distributeRuns(configs, opts.runsPerBinary);
     applyProcessSettings();
 
-    // compile the two cloned binary sets
+    // compile the two cloned binary sets; a compile failure on either side
+    // is fatal because the comparison needs both sides
+    std::string sourceError, transformedError;
     result.sourceBinaries = compileBinarySet(sourceModule, opts.seed, "source",
-                                             &result.error);
+                                             &sourceError);
     result.transformedBinaries = compileBinarySet(transformedModule, opts.seed,
                                                   "transformed",
-                                                  &result.error);
-
-    if (result.sourceBinaries.empty() && result.transformedBinaries.empty())
+                                                  &transformedError);
+    if (!sourceError.empty() || !transformedError.empty()) {
+        result.error = !sourceError.empty() ? sourceError : transformedError;
         return result;
+    }
 
     // run every binary under the agitation configs and merge the outcome sets
     for (auto &binary : result.sourceBinaries) {
@@ -296,7 +299,8 @@ bool runTsanTriage(const llvm::Module &sourceModule,
                                               &err, /*enableTsan=*/true,
                                               /*jitOptLevel=*/2);
         if (!fn) {
-            compileError = err;
+            compileError =
+                "JIT compile error (" + entry.second + "): " + err;
             break;
         }
 
