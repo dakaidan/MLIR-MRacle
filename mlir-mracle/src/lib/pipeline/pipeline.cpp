@@ -10,8 +10,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <cmath>
-#include <set>
 
 namespace mlir_mracle {
 namespace {
@@ -24,7 +22,7 @@ VerdictIssue failIssue(const std::string &reason) {
     return issue;
 }
 
-// summarises a single binary's outcome set for the run-level union outcome sets
+// summarises a single campaign for the run-level union outcome sets
 BinaryOutcomeSummary toBinaryOutcomeSummary(const CompiledBinary &bin) {
     BinaryOutcomeSummary summary;
     summary.identity = bin.identity;
@@ -47,46 +45,153 @@ void populateRunInfoFromExecution(RunInfo &info, ExecutionResult &exec) {
         info.binaryOutcomes.push_back(toBinaryOutcomeSummary(bin));
 }
 
-// replays the compilation and execution of all binaries in rounds of extra runs
-// used in pipeline when results are inconclusive
-OracleResult runReplayLoop(ExecutionResult &exec, int seed, int configCount,
-                           const PipelineOptions &opts,
-                           OracleOptions oracleOpts,
-                           const llvm::Module &sourceModule,
-                           const llvm::Module &transformedModule,
-                           std::string &triageError) {
-    OracleResult verdict = oracleCompare(exec, oracleOpts);
-    int64_t binaryCount =
-        std::max<int64_t>(1, static_cast<int64_t>(exec.sourceBinaries.size()));
-    int replayRound = 0;
+// renders a joint outcome as [a, b, ...] for the artifact record
+std::string formatOutcome(const JointOutcome &outcome) {
+    std::string out = "[";
+    for (size_t i = 0; i < outcome.size(); ++i) {
+        if (i > 0)
+            out += ", ";
+        out += std::to_string(outcome[i]);
+    }
+    out += "]";
+    return out;
+}
 
-    while ((verdict.needsRerun || verdict.compare.warn()) &&
-           exec.sourceTotal.totalRuns < opts.maxSourceReps) {
-        int64_t budget = opts.maxSourceReps - exec.sourceTotal.totalRuns;
-        int extra = static_cast<int>(std::min<int64_t>(
-            opts.retestReps, budget / binaryCount));
-        if (extra <= 0)
-            break;
-        // each round re-agitates with a seed derived directly from the run seed
-        // allowing reproducible replay of the same rare states across rounds
-        rerunAllBinaries(exec, extra,
-                         static_cast<uint32_t>(seed) +
-                             static_cast<uint32_t>(++replayRound),
-                         configCount);
+std::string distributionVerdictName(DistributionVerdict verdict) {
+    switch (verdict) {
+    case DistributionVerdict::Ok:
+        return "OK";
+    case DistributionVerdict::Bad:
+        return "BAD";
+    case DistributionVerdict::Inconclusive:
+        break;
+    }
+    return "INCONCLUSIVE";
+}
+
+std::string supportVerdictName(SupportVerdict verdict) {
+    switch (verdict) {
+    case SupportVerdict::Fail:
+        return "FAIL";
+    case SupportVerdict::Candidate:
+        return "CANDIDATE";
+    case SupportVerdict::Ok:
+        break;
+    }
+    return "OK";
+}
+
+// every campaign of one run draws its seed from the run seed and its index, so
+// a fixed --seed reproduces the whole campaign sequence
+uint32_t campaignSeedFor(int runSeed, int campaignIndex) {
+    return static_cast<uint32_t>(runSeed) +
+           static_cast<uint32_t>(campaignIndex) * 0x9e3779b9u;
+}
+
+// collects campaigns until the oracle can decide, then returns its verdict
+// collects campaigns until the oracle can decide, then returns its verdict
+bool runCampaignLoop(ExecutionResult &exec, int seed,
+                     const PipelineOptions &opts, OutcomeRelation relation,
+                     const llvm::Module &sourceModule,
+                     const llvm::Module &transformedModule,
+                     OracleResult &verdict, std::string &error) {
+    CampaignOptions campaignOpts;
+    campaignOpts.executionsPerCampaign = opts.executionsPerCampaign;
+    campaignOpts.teamSize = opts.teamSize;
+    campaignOpts.jitOptLevel = kStandardJitOptLevel;
+
+    OracleOptions oracleOpts;
+    oracleOpts.relation = relation;
+    oracleOpts.maxCampaigns = static_cast<size_t>(std::max(1, opts.campaignsMax));
+    oracleOpts.distribution.tvdThreshold = opts.tvdThreshold;
+    oracleOpts.distribution.bootstrapReplicates = opts.bootstrapReplicates;
+    oracleOpts.distribution.confidenceLevel = opts.confidenceLevel;
+    oracleOpts.distribution.thresholdPct = opts.thresholdPct;
+    oracleOpts.distribution.bootstrapSeed = static_cast<uint32_t>(seed);
+    oracleOpts.distribution.maxRunsPerSide =
+        static_cast<int64_t>(std::max(1, opts.campaignsMax)) *
+        static_cast<int64_t>(std::max(1, opts.executionsPerCampaign));
+
+    int campaignIndex = 0;
+    const int initial = std::max(1, opts.campaignsInitial);
+    for (; campaignIndex < initial; ++campaignIndex) {
+        if (!runCampaignPair(exec, sourceModule, transformedModule,
+                             campaignIndex, campaignSeedFor(seed, campaignIndex),
+                             campaignOpts, error))
+            return false;
+    }
+
+    verdict = oracleCompare(exec, oracleOpts);
+
+    // an inconclusive comparison or an unresolved support candidate buys
+    // another batch of independent campaigns, up to the cap. Batching keeps the
+    // number of verdicts low while the sample grows towards the rerun budget.
+    while (verdict.needsRerun && campaignIndex < opts.campaignsMax) {
+        const int batch =
+            std::min(initial, opts.campaignsMax - campaignIndex);
+        for (int i = 0; i < batch; ++i, ++campaignIndex) {
+            if (!runCampaignPair(exec, sourceModule, transformedModule,
+                                 campaignIndex,
+                                 campaignSeedFor(seed, campaignIndex),
+                                 campaignOpts, error))
+                return false;
+        }
         verdict = oracleCompare(exec, oracleOpts);
     }
-    // if the verdict is still inconclusive after the maxSourceReps cap
-    // run a final TSan triage
-    if (verdict.needsRerun) {
-        std::string err;
-        if (!runTsanTriage(sourceModule, transformedModule, exec,
-                           opts.retestReps,
-                           static_cast<uint32_t>(seed) + 0x9e3779b9u,
-                           configCount, &err))
-            triageError = err;
+
+    return true;
+}
+
+// records the oracle's verdict on the run
+void applyVerdict(RunInfo &info, const OracleResult &verdict,
+                  const PipelineOptions &opts) {
+    info.issues = verdict.compare.issues;
+
+    DistributionSummary summary;
+    const std::string status = runStatusString(info);
+    summary.verdict = status == "ERROR" ? "BAD" : status == "WARN" ? "WARN" : "OK";
+    summary.tvdVerdict = distributionVerdictName(verdict.distribution.verdict);
+    summary.tvd = verdict.distribution.tvd;
+    summary.ciLow = verdict.distribution.ciLow;
+    summary.ciHigh = verdict.distribution.ciHigh;
+    summary.tvdThreshold = opts.tvdThreshold;
+    summary.confidenceLevel = opts.confidenceLevel;
+    summary.bootstrapReplicates = opts.bootstrapReplicates;
+    summary.sourceCampaigns =
+        static_cast<int64_t>(verdict.distribution.sourceCampaigns);
+    summary.transformedCampaigns =
+        static_cast<int64_t>(verdict.distribution.transformedCampaigns);
+    summary.excludedCampaigns =
+        static_cast<int64_t>(verdict.distribution.excludedCampaigns);
+    summary.sourceRuns = verdict.distribution.sourceRuns;
+    summary.transformedRuns = verdict.distribution.transformedRuns;
+    summary.sourceSupport =
+        static_cast<int64_t>(verdict.distribution.sourceSupport);
+    summary.transformedSupport =
+        static_cast<int64_t>(verdict.distribution.transformedSupport);
+    summary.sourceEffCategories = verdict.distribution.sourceEffCategories;
+    summary.transformedEffCategories =
+        verdict.distribution.transformedEffCategories;
+    summary.sourceUnseenMass = verdict.distribution.sourceUnseenMass;
+    summary.transformedUnseenMass = verdict.distribution.transformedUnseenMass;
+    summary.executionsPerCampaign = opts.executionsPerCampaign;
+    summary.teamSize = opts.teamSize;
+    summary.jitOptLevel = kStandardJitOptLevel;
+    info.distribution = std::move(summary);
+
+    for (const auto &violation : verdict.support) {
+        SupportViolationSummary record;
+        record.outcome = formatOutcome(violation.outcome);
+        record.side = violation.transformedOnly ? "transformed" : "source";
+        record.count = violation.count;
+        record.runs = violation.runs;
+        record.rate = violation.rate;
+        record.bandRate = violation.bandRate;
+        record.significant = violation.significant;
+        record.establishable = violation.establishable;
+        record.verdict = supportVerdictName(violation.verdict);
+        info.supportViolations.push_back(std::move(record));
     }
-    oracleOpts.postReruns = true;
-    return oracleCompare(exec, oracleOpts);
 }
 
 } // namespace
@@ -104,16 +209,7 @@ RunInfo runSingle(const std::string &inputFile, int seed,
         return setup.runInfo;
     }
 
-    // apply jitter as part of the agitation sweep, fail if unable
-    if (!applyJitter(setup.mlirContext, *originalModule, seed,
-                     setup.runInfo.error) ||
-        !applyJitter(setup.mlirContext, *moduleToTransform, seed,
-                     setup.runInfo.error)) {
-        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
-        return setup.runInfo;
-    }
-
-    // snapshot both jittered modules before lowering overwrites them
+    // snapshot both modules before lowering overwrites them
     setup.runInfo.sourceMLIR = dumpMLIR(*originalModule);
     setup.runInfo.transformedMLIR = dumpMLIR(*moduleToTransform);
 
@@ -137,43 +233,20 @@ RunInfo runSingle(const std::string &inputFile, int seed,
         return setup.runInfo;
     }
 
-    ExecutionOptions execOpts;
-    execOpts.seed = static_cast<uint32_t>(seed);
-    execOpts.runsPerBinary = opts.reps;
-    execOpts.singleThreadRuns = kDeterminismReps;
-    
-    // run the execution harness: compiles all modules, runs agitation, collects results
-    ExecutionResult exec = runExecutionHarness(*sourceLLVM, *transformedLLVM,
-                                               execOpts);
-    if (!exec.error.empty()) {
-        setup.runInfo.error = exec.error;
-        setup.runInfo.issues.push_back(failIssue(setup.runInfo.error));
+    // run the campaign loop: fresh compilations of both variants under the
+    // standard configuration, judged by the distributional oracle
+    ExecutionResult exec;
+    OracleResult verdict;
+    std::string campaignError;
+    if (!runCampaignLoop(exec, seed, opts, setup.runInfo.relation, *sourceLLVM,
+                         *transformedLLVM, verdict, campaignError)) {
+        setup.runInfo.error = campaignError;
+        setup.runInfo.issues.push_back(failIssue(campaignError));
         return setup.runInfo;
     }
 
-    OracleOptions oracleOpts;
-    oracleOpts.relation = setup.runInfo.relation;
-    oracleOpts.thresholdPct = opts.thresholdPct;
-
-    std::string triageError;
-    OracleResult verdict = runReplayLoop(exec, seed, execOpts.configCount,
-                                         opts, oracleOpts,
-                                         *sourceLLVM, *transformedLLVM,
-                                         triageError);
     populateRunInfoFromExecution(setup.runInfo, exec);
-
-    if (!triageError.empty()) {
-        setup.runInfo.error = triageError;
-        setup.runInfo.issues.push_back(failIssue(triageError));
-        return setup.runInfo;
-    }
-
-    setup.runInfo.issues = verdict.compare.issues;
-
-    if (!verdict.compare.ok())
-        setup.runInfo.error = verdict.compare.message();
-    else if (verdict.compare.warn())
-        setup.runInfo.warn = verdict.compare.message();
+    applyVerdict(setup.runInfo, verdict, opts);
     return setup.runInfo;
 }
 

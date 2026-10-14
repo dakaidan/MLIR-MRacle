@@ -134,25 +134,6 @@ bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
     return true;
 }
 
-// Applies random jitter to MLIR module for agitation
-bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module, int seed,
-                 std::string &error) {
-    mlir::ScopedDiagnosticHandler diagHandler(
-        &ctx, [&](mlir::Diagnostic &diag) {
-            if (!error.empty())
-                error += "; ";
-            error += diag.str();
-            return mlir::success();
-        });
-    error = "jitter pass failed";
-    mlir::PassManager pm(&ctx, mlir::ModuleOp::getOperationName());
-    pm.addPass(mlir::createMetamorphicPass(seed, nullptr, "insert-jitter", 1));
-    if (mlir::failed(pm.run(module)))
-        return false;
-    error.clear();
-    return true;
-}
-
 // lowers a module to the LLVM dialect and translates it to LLVM IR
 bool lowerAndTranslate(mlir::ModuleOp module, mlir::MLIRContext &mlirCtx,
                        llvm::LLVMContext &llvmCtx, const std::string &label,

@@ -35,6 +35,7 @@ struct JsonValue {
 // JSON value constructors and accessors
 JsonValue jsonBool(bool v);
 JsonValue jsonInt(int64_t v);
+JsonValue jsonDouble(double v);
 JsonValue jsonString(std::string v);
 JsonValue jsonArray();
 void jsonPush(JsonValue &arr, JsonValue v);

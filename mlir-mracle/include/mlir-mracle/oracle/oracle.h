@@ -2,33 +2,41 @@
 
 #include "mlir-mracle/core/types.h"
 #include "mlir-mracle/execution/execution.h"
+#include "mlir-mracle/oracle/distribution.h"
 
 #include <cstdint>
-#include <set>
+#include <vector>
 
 namespace mlir_mracle {
 
-// options for the oracle's comparison of joint outcome sets
+// Options for the oracle's distribution comparison and support check
 struct OracleOptions {
-    // the relation used to judge the joint outcome sets
+    // The relation gates both components: Equality judges both directions,
+    // Subset only the outcomes the transformed side adds, Superset only the
+    // outcomes it drops.
     OutcomeRelation relation = OutcomeRelation::Equality;
 
-    // the threshold percentage for judging a missing or differing state as a hard fail
-    int thresholdPct = 5;
+    // Campaign budget; the oracle asks for more campaigns while it is inconclusive
+    size_t maxCampaigns = 50;
 
-    // true if the comparison is the post-replay round judging merged data; false if the pre-replay round
-    bool postReruns = false;
+    DistributionOptions distribution;
 };
 
-// the result of the oracle's comparison of joint outcome sets
+// Result of the oracle's comparison of the two variants' outcome distributions
 struct OracleResult {
     CompareResult compare;
 
-    // true if results are inconclusive and the run should be re-executed with more threads or runs
+    // true if the comparison is inconclusive and more campaigns should be collected
     bool needsRerun = false;
+
+    // Evidence behind the verdict, recorded in the run artifacts for debugging;
+    // never required to read the verdict itself.
+    DistributionResult distribution;
+    std::vector<SupportViolation> support;
 };
 
-// Judges the joint outcome sets aggregated across the agitation sweep
+// Judges the per-campaign outcome distributions of the source and transformed
+// programs, and the outcomes only one of them produces.
 OracleResult oracleCompare(const ExecutionResult &exec,
                            const OracleOptions &opts);
 

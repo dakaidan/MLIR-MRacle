@@ -17,14 +17,25 @@ struct PipelineOptions {
     int seed = -1;
     int runNumber = 0;          // first run index
     int numRuns = 1;            // pipeline repetitions, set by --iter
-    int reps = 5000;            // executions per program per thread count, set by --reps
+    int reps = 5000;            // emit mode: transformations picked; execution mode: runs per file
     std::string transform;      // comma-separated list of transforms to try, empty = any
     int maxApply = 1;           // limit of transforms to apply per run
     std::string model;          // memory model gating applicable transforms, empty = generic only
     std::string campaignDir;    // output folder; runs are added as they complete
-    int retestReps = 5000;      // extra source runs when transformed finds a new outcome
-    int maxSourceReps = 100000; // hard cap for total source runs across all binaries
-    int thresholdPct = 5;       // fail/warn classifier
+    int retestReps = 5000;      // legacy pipeline replay budget
+    int maxSourceReps = 100000; // legacy pipeline replay cap
+    int thresholdPct = 5;       // share of runs a support violation must reach to fail a run
+
+    // measurement protocol of the distributional oracle
+    int campaignsInitial = 10;  // campaigns collected before the first verdict,
+                                // and the size of each later batch
+    int campaignsMax = 50;      // cap while inconclusive: 50 x 2000 = 100,000
+                                // executions per variant
+    int executionsPerCampaign = 2000;
+    int teamSize = 4;           // OpenMP team size, identical for both variants
+    double tvdThreshold = 0.05; // practical tolerance on the distributional discrepancy
+    int bootstrapReplicates = 2000;
+    double confidenceLevel = 0.95;
 };
 
 // result of a single run of the pipeline, including the verdict and all outcome sets

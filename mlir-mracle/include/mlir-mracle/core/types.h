@@ -100,11 +100,12 @@ struct OutcomeSetResult {
     CompareResult compare;
 };
 
-// Identity of a compiled binary within one side of an agitation sweep
+// Identity of one compiled campaign on one side of a comparison
 struct BinaryIdentity {
-    std::string side;     // "source" | "transformed"
-    int compileIndex = 0; // index to match same-config binaries across sides
-    int jitOptLevel = -1; // CodeGen opt level used for this binary
+    std::string side;              // "source" | "transformed"
+    int compileIndex = 0;          // campaign index, used to match the two sides
+    int jitOptLevel = -1;          // CodeGen opt level used for this binary
+    uint32_t campaignSeed = 0;     // seed that drove this campaign's executions
 };
 
 } // namespace mlir_mracle

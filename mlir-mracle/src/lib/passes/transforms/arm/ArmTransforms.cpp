@@ -10,13 +10,43 @@
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/SmallVector.h"
 #include <iterator>
+#include <optional>
 #include <random>
 #include <utility>
 
 namespace mlir {
 namespace metamorphic {
 
-// reorders two relaxed read and write operations in a function, if possible, to commute them
+namespace {
+// True when the atomic op carries an explicit relaxed memory order. An unset
+// order defaults to seq_cst, which must never be reordered.
+bool isRelaxed(Operation *op) {
+    std::optional<omp::ClauseMemoryOrderKind> order;
+    if (auto write = dyn_cast<omp::AtomicWriteOp>(op))
+        order = write.getMemoryOrder();
+    else if (auto read = dyn_cast<omp::AtomicReadOp>(op))
+        order = read.getMemoryOrder();
+    else
+        return false;
+    return order.value_or(omp::ClauseMemoryOrderKind::Seq_cst) ==
+           omp::ClauseMemoryOrderKind::Relaxed;
+}
+
+// True when no operand of `moved` is produced by `anchor` or by any op in
+// between, so moving `moved` before `anchor` cannot create a use-before-def.
+// `anchor` and `moved` are in the same block.
+bool operandsDominate(Operation *anchor, Operation *moved) {
+    for (Operation *op = anchor; op && op != moved; op = op->getNextNode())
+        for (Value res : op->getResults())
+            for (Value operand : moved->getOperands())
+                if (operand == res)
+                    return false;
+    return true;
+}
+} // namespace
+
+// commutes an independent relaxed atomic read and write in a function, if
+// possible, so the write executes before the read
 bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
                                 std::mt19937 &rng) {
     SmallVector<std::pair<omp::AtomicReadOp, omp::AtomicWriteOp>> candidates;
@@ -24,7 +54,15 @@ bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
         Operation *nextOp = read->getNextNode();
         while (nextOp) {
             if (auto nextWrite = dyn_cast<omp::AtomicWriteOp>(nextOp)) {
-                candidates.push_back({read, nextWrite});
+                // outcome-preserving only for independent relaxed accesses:
+                // both ops must be relaxed, the write must target a location
+                // the read does not touch, and the write must not depend on
+                // the read or the ops in between
+                if (isRelaxed(read) && isRelaxed(nextWrite) &&
+                    nextWrite.getX() != read.getX() &&
+                    nextWrite.getX() != read.getV() &&
+                    operandsDominate(read, nextWrite))
+                    candidates.push_back({read, nextWrite});
                 break;
             }
             // allow a non-atomic op in between only when it is a pure arith
@@ -52,7 +90,8 @@ bool tryCommuteRelaxedReadWrite(func::FuncOp op, RewriterBase &rewriter,
     return true;
 }
 
-// reorders two relaxed write operations in a function, if possible, to commute them
+// commutes two independent relaxed atomic writes in a function, if possible,
+// so the second write executes before the first
 bool tryCommuteRelaxedWriteWrite(func::FuncOp op, RewriterBase &rewriter,
                                  std::mt19937 &rng) {
     SmallVector<std::pair<omp::AtomicWriteOp, omp::AtomicWriteOp>> candidates;
@@ -60,7 +99,13 @@ bool tryCommuteRelaxedWriteWrite(func::FuncOp op, RewriterBase &rewriter,
         Operation *nextOp = first->getNextNode();
         while (nextOp) {
             if (auto nextWrite = dyn_cast<omp::AtomicWriteOp>(nextOp)) {
-                candidates.push_back({first, nextWrite});
+                // outcome-preserving only for independent relaxed accesses:
+                // both ops must be relaxed, target different locations, and
+                // the second write must not depend on the ops in between
+                if (isRelaxed(first) && isRelaxed(nextWrite) &&
+                    first.getX() != nextWrite.getX() &&
+                    operandsDominate(first, nextWrite))
+                    candidates.push_back({first, nextWrite});
                 break;
             }
             // allow a non-atomic op in between only when it is a pure arith

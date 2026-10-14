@@ -46,6 +46,13 @@ JsonValue jsonString(std::string s) {
     return v;
 }
 
+JsonValue jsonDouble(double d) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Double;
+    v.doubleVal = d;
+    return v;
+}
+
 JsonValue jsonArray() {
     JsonValue v;
     v.kind = JsonValue::Kind::Array;
@@ -401,6 +408,76 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
     return obj;
 }
 
+namespace {
+
+// renders the distributional verdict and the protocol that produced it
+JsonValue distributionToJson(const RunInfo &info) {
+    const DistributionSummary &summary = info.distribution;
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "verdict", jsonString(summary.verdict));
+    jsonPut(obj, "tvd_verdict", jsonString(summary.tvdVerdict));
+    jsonPut(obj, "tvd", jsonDouble(summary.tvd));
+    jsonPut(obj, "ci_low", jsonDouble(summary.ciLow));
+    jsonPut(obj, "ci_high", jsonDouble(summary.ciHigh));
+    jsonPut(obj, "tvd_threshold", jsonDouble(summary.tvdThreshold));
+    jsonPut(obj, "confidence_level", jsonDouble(summary.confidenceLevel));
+    jsonPut(obj, "bootstrap_replicates", jsonInt(summary.bootstrapReplicates));
+    jsonPut(obj, "source_campaigns", jsonInt(summary.sourceCampaigns));
+    jsonPut(obj, "transformed_campaigns",
+            jsonInt(summary.transformedCampaigns));
+    jsonPut(obj, "excluded_campaigns", jsonInt(summary.excludedCampaigns));
+    jsonPut(obj, "source_runs", jsonInt(summary.sourceRuns));
+    jsonPut(obj, "transformed_runs", jsonInt(summary.transformedRuns));
+    jsonPut(obj, "source_support", jsonInt(summary.sourceSupport));
+    jsonPut(obj, "transformed_support", jsonInt(summary.transformedSupport));
+    jsonPut(obj, "source_eff_categories",
+            jsonDouble(summary.sourceEffCategories));
+    jsonPut(obj, "transformed_eff_categories",
+            jsonDouble(summary.transformedEffCategories));
+    jsonPut(obj, "source_unseen_mass", jsonDouble(summary.sourceUnseenMass));
+    jsonPut(obj, "transformed_unseen_mass",
+            jsonDouble(summary.transformedUnseenMass));
+    return obj;
+}
+
+// renders the measurement protocol of the run
+JsonValue protocolToJson(const RunInfo &info) {
+    const DistributionSummary &summary = info.distribution;
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "executions_per_campaign",
+            jsonInt(summary.executionsPerCampaign));
+    jsonPut(obj, "team_size", jsonInt(summary.teamSize));
+    jsonPut(obj, "jit_opt_level", jsonInt(summary.jitOptLevel));
+    jsonPut(obj, "campaign_order", jsonString("alternating"));
+
+    JsonValue sharedState = jsonArray();
+    jsonPush(sharedState, jsonString("process-wide OpenMP runtime settings"));
+    jsonPush(sharedState, jsonString("one JIT instance per campaign"));
+    jsonPut(obj, "shared_state", std::move(sharedState));
+    return obj;
+}
+
+// renders the outcomes only one variant produced
+JsonValue supportViolationsToJson(const RunInfo &info) {
+    JsonValue arr = jsonArray();
+    for (const auto &violation : info.supportViolations) {
+        JsonValue entry = jsonObject();
+        jsonPut(entry, "outcome", jsonString(violation.outcome));
+        jsonPut(entry, "side", jsonString(violation.side));
+        jsonPut(entry, "count", jsonInt(violation.count));
+        jsonPut(entry, "runs", jsonInt(violation.runs));
+        jsonPut(entry, "rate", jsonDouble(violation.rate));
+        jsonPut(entry, "band_rate", jsonDouble(violation.bandRate));
+        jsonPut(entry, "significant", jsonBool(violation.significant));
+        jsonPut(entry, "establishable", jsonBool(violation.establishable));
+        jsonPut(entry, "verdict", jsonString(violation.verdict));
+        jsonPush(arr, std::move(entry));
+    }
+    return arr;
+}
+
+} // namespace
+
 JsonValue runInfoToUnionJson(const RunInfo &info) {
     JsonValue obj = runMetadataToJson(info);
 
@@ -419,6 +496,7 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
         jsonPut(entry, "side", jsonString(b.identity.side));
         jsonPut(entry, "compile_index", jsonInt(b.identity.compileIndex));
         jsonPut(entry, "jit_opt_level", jsonInt(b.identity.jitOptLevel));
+        jsonPut(entry, "seed", jsonInt(b.identity.campaignSeed));
         jsonPut(entry, "runs", jsonInt(b.observed.totalRuns));
         jsonPut(entry, "outcomes",
                 outcomeListToJson(b.observed.outcomes, b.observed.counts));
@@ -426,6 +504,14 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
     }
 
     jsonPut(obj, "binary_results", std::move(binaries));
+
+    if (!info.distribution.verdict.empty()) {
+        jsonPut(obj, "distribution", distributionToJson(info));
+        jsonPut(obj, "protocol", protocolToJson(info));
+        if (!info.supportViolations.empty())
+            jsonPut(obj, "support_violations",
+                    supportViolationsToJson(info));
+    }
     return obj;
 }
 

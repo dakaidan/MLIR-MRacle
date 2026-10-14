@@ -3,7 +3,6 @@ add_subdirectory(backend)
 add_subdirectory(passes)
 add_subdirectory(context)
 add_subdirectory(oracle)
-add_subdirectory(agitation)
 add_subdirectory(execution)
 add_subdirectory(io)
 add_subdirectory(pipeline)
@@ -26,7 +25,6 @@ target_link_libraries(mlir_mracle INTERFACE
     mlir_mracle_passes
     mlir_mracle_context
     mlir_mracle_oracle
-    mlir_mracle_agitation
     mlir_mracle_execution
     mlir_mracle_io
     mlir_mracle_pipeline

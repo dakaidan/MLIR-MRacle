@@ -18,15 +18,16 @@ namespace mlir_mracle {
 // the 1-thread group is a determinism check, so a small budget suffices
 inline constexpr int kDeterminismReps = 32;
 
-// team-size sweep per run; the 2-thread primary test runs first so it is
-// always the first to fail or warn. 1 is the single-thread determinism
-// probe, 4/8 the wider concurrency sweep.
+// thread counts used by the legacy pipeline and execution mode; 1 is the
+// single-thread determinism probe, the rest widen the concurrency sweep
 inline constexpr int kThreadCounts[] = {2, 1, 4, 8};
 
-// the legacy pipeline and execution mode keep the JIT's default CodeGen
-// opt level; the default agitation sweep randomises opt levels per compiled
-// binary instead
+// the legacy pipeline and execution mode keep the JIT's default CodeGen level
 inline constexpr int kLegacyJitOptLevel = -1;
+
+// the distributional protocol compiles every campaign at one fixed CodeGen
+// opt level: the JIT's default
+inline constexpr int kStandardJitOptLevel = -1;
 
 // per-campaign log folder; runs are written into it as they complete
 extern std::string gCampaignDir;
@@ -61,12 +62,6 @@ bool parseModuleFile(const std::string &file, mlir::MLIRContext &ctx,
 bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
                      mlir::OwningOpRef<mlir::ModuleOp> &originalModule,
                      mlir::OwningOpRef<mlir::ModuleOp> &transformedModule);
-
-// Applies the jitter transform to a module: the pass runs with the fixed
-// transform name and the run's own seed, so both sides of the comparison
-// receive the same seeded RNG stream and the jitter density stays symmetric.
-bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module, int seed,
-                 std::string &error);
 
 // lowers a module to the LLVM dialect and translates it to LLVM IR,
 // capturing diagnostics in error; IR dumps are only produced when requested

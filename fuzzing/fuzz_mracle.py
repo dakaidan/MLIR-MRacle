@@ -101,8 +101,9 @@ def main():
     parser.add_argument(
         "--reps", type=int, default=5000,
         help="with --mode=emit: number of times transformations are picked "
-             "and applied; otherwise: executions per program per thread "
-             "count (default 5000)"
+             "and applied; with --mode=execution: executions per file (default "
+             "5000). Compare mode measures campaigns instead, so it rejects "
+             "this flag: use --executions-per-campaign."
     )
     parser.add_argument(
         "--iter", type=int, default=1,
@@ -129,6 +130,42 @@ def main():
     parser.add_argument(
         "--campaign-dir", metavar="PATH",
         help="resume/continue a campaign, or set the output directory for --mode=emit"
+    )
+    parser.add_argument(
+        "--campaigns", type=int, default=10,
+        help="compare: campaigns collected per variant before the first "
+             "verdict, and the size of each later batch (default 10)"
+    )
+    parser.add_argument(
+        "--max-campaigns", type=int, default=50,
+        help="compare: cap on campaigns per variant while a verdict stays "
+             "inconclusive (default 50, i.e. a rerun budget of 100,000 "
+             "executions per variant at the default campaign size)"
+    )
+    parser.add_argument(
+        "--executions-per-campaign", type=int, default=2000,
+        help="compare: executions per campaign (default 2000, i.e. 20,000 "
+             "executions per variant over the default 10 campaigns)"
+    )
+    parser.add_argument(
+        "--team-size", type=int, default=4,
+        help="compare: OpenMP team size for every execution "
+             "(default 4)"
+    )
+    parser.add_argument(
+        "--tvd-threshold", type=float, default=0.05,
+        help="compare: tolerated distributional discrepancy "
+             "(default 0.05)"
+    )
+    parser.add_argument(
+        "--bootstrap", type=int, default=2000,
+        help="compare: campaign-level bootstrap replicates "
+             "(default 2000)"
+    )
+    parser.add_argument(
+        "--confidence", type=float, default=0.95,
+        help="compare: confidence level of the interval "
+             "(default 0.95)"
     )
     parser.add_argument(
         "--threshold", type=int, default=5,
@@ -184,13 +221,23 @@ def main():
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
     cmd.append(f"--mode={','.join(modes)}")
-    cmd.append(f"--reps={args.reps}")
+    distributing = "compare" in modes
+    if not distributing:
+        cmd.append(f"--reps={args.reps}")
     cmd.append(f"--iter={args.iter}")
     cmd.append(f"--apply={args.apply}")
     cmd.append(f"--model={args.model}")
     cmd.append(f"--threshold={args.threshold}")
-    cmd.append(f"--reruns={args.reruns}")
-    cmd.append(f"--max-runs={args.max_runs}")
+    if "legacy" in modes:
+        cmd.append(f"--reruns={args.reruns}")
+        cmd.append(f"--max-runs={args.max_runs}")
+    cmd.append(f"--campaigns={args.campaigns}")
+    cmd.append(f"--max-campaigns={args.max_campaigns}")
+    cmd.append(f"--executions-per-campaign={args.executions_per_campaign}")
+    cmd.append(f"--team-size={args.team_size}")
+    cmd.append(f"--tvd-threshold={args.tvd_threshold}")
+    cmd.append(f"--bootstrap={args.bootstrap}")
+    cmd.append(f"--confidence={args.confidence}")
 
     transforms = []
     for value in args.transform:

@@ -36,6 +36,14 @@ void failUnknownMode(const std::string &name) {
     std::exit(1);
 }
 
+// true when any selected mode uses the distributional protocol
+bool usesDistribution(const std::vector<PipelineMode> &modes) {
+    for (PipelineMode mode : modes)
+        if (mode == PipelineMode::Compare)
+            return true;
+    return false;
+}
+
 } // namespace
 
 CliOptions parsePipelineOptions(int &argc, char **argv) {
@@ -66,6 +74,7 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
                 }
             }
         } else if (std::strncmp(argv[i], "--reps=", 7) == 0) {
+            cli.repsExplicit = true;
             cli.pipeline.reps = std::strtol(argv[i] + 7, nullptr, 10);
         } else if (std::strncmp(argv[i], "--iter=", 7) == 0) {
             cli.pipeline.numRuns = std::strtol(argv[i] + 7, nullptr, 10);
@@ -84,10 +93,28 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
         } else if (std::strncmp(argv[i], "--threshold=", 12) == 0) {
             cli.pipeline.thresholdPct = std::strtol(argv[i] + 12, nullptr, 10);
         } else if (std::strncmp(argv[i], "--reruns=", 9) == 0) {
+            cli.rerunsExplicit = true;
             cli.pipeline.retestReps = std::strtol(argv[i] + 9, nullptr, 10);
         } else if (std::strncmp(argv[i], "--max-runs=", 11) == 0) {
+            cli.maxRunsExplicit = true;
             cli.pipeline.maxSourceReps =
                 std::strtol(argv[i] + 11, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--campaigns=", 12) == 0) {
+            cli.pipeline.campaignsInitial = std::strtol(argv[i] + 12, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--max-campaigns=", 16) == 0) {
+            cli.pipeline.campaignsMax = std::strtol(argv[i] + 16, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--executions-per-campaign=", 26) == 0) {
+            cli.pipeline.executionsPerCampaign =
+                std::strtol(argv[i] + 26, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--team-size=", 12) == 0) {
+            cli.pipeline.teamSize = std::strtol(argv[i] + 12, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--tvd-threshold=", 16) == 0) {
+            cli.pipeline.tvdThreshold = std::strtod(argv[i] + 16, nullptr);
+        } else if (std::strncmp(argv[i], "--bootstrap=", 12) == 0) {
+            cli.pipeline.bootstrapReplicates =
+                std::strtol(argv[i] + 12, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--confidence=", 13) == 0) {
+            cli.pipeline.confidenceLevel = std::strtod(argv[i] + 13, nullptr);
         } else {
             argv[newArgc++] = argv[i];
         }
@@ -103,6 +130,9 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
                      "[--multi=FOLDER] [--campaign-dir=PATH] "
                      "[--threshold=PCT] "
                      "[--reruns=N] [--max-runs=N] "
+                     "[--campaigns=N] [--max-campaigns=N] "
+                     "[--executions-per-campaign=N] [--team-size=N] "
+                     "[--tvd-threshold=X] [--bootstrap=N] [--confidence=X] "
                      "<path-to-mlir-file>\n";
         std::exit(1);
     }
@@ -130,6 +160,50 @@ CliOptions parsePipelineOptions(int &argc, char **argv) {
     if (cli.pipeline.reps <= 0) {
         std::cerr << "--reps must be > 0\n";
         std::exit(1);
+    }
+
+    // the distributional pipelines measure a campaign budget instead of an
+    // execution budget, so their flags are validated on their own terms
+    if (usesDistribution(cli.modes)) {
+        if (cli.repsExplicit) {
+            std::cerr << "compare mode measures campaigns: use "
+                         "--executions-per-campaign instead of --reps\n";
+            std::exit(1);
+        }
+        if (cli.rerunsExplicit || cli.maxRunsExplicit) {
+            std::cerr << "compare mode samples campaigns: use --campaigns and "
+                         "--max-campaigns instead of --reruns and --max-runs\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.campaignsInitial < 2) {
+            std::cerr << "--campaigns must be >= 2\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.campaignsMax < cli.pipeline.campaignsInitial) {
+            std::cerr << "--max-campaigns must be >= --campaigns\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.executionsPerCampaign <= 0) {
+            std::cerr << "--executions-per-campaign must be > 0\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.teamSize <= 0) {
+            std::cerr << "--team-size must be > 0\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.tvdThreshold <= 0.0 || cli.pipeline.tvdThreshold > 1.0) {
+            std::cerr << "--tvd-threshold must be in (0, 1]\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.bootstrapReplicates <= 0) {
+            std::cerr << "--bootstrap must be > 0\n";
+            std::exit(1);
+        }
+        if (cli.pipeline.confidenceLevel <= 0.0 ||
+            cli.pipeline.confidenceLevel >= 1.0) {
+            std::cerr << "--confidence must be in (0, 1)\n";
+            std::exit(1);
+        }
     }
 
     if (!cli.pipeline.multiFolder.empty())

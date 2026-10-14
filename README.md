@@ -31,7 +31,6 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 │   └── src/
 │       ├── app/               # mlir_mracle_opt CLI driver
 │       └── lib/
-│           ├── agitation/     # perturbs modules (basic-block layout) and generates runtime configs
 │           ├── backend/
 │           │   ├── jit/       # JIT-compiles LLVM modules for execution
 │           │   └── lowering/  # lowers MLIR to LLVM IR
@@ -39,7 +38,7 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 │           ├── execution/     # runs compiled binaries and collects observed outcomes
 │           ├── io/            # serializes results and dumps IR artifacts
 │           ├── legacy/        # legacy thread-group oracle pipeline (--mode=legacy)
-│           ├── oracle/        # compares outcome sets and derives verdicts
+│           ├── oracle/        # compares outcome distributions and derives verdicts
 │           ├── pipeline/      # pipeline orchestration, emit and execution modes
 │           └── passes/        # metamorphic transformation passes
 ├── fuzzing/
@@ -58,23 +57,22 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 flowchart LR
     A[Parse MLIR and clone] --> B[Apply metamorphic transforms]
     B --> C[Lower to LLVM IR]
-    C --> D[Agitate clones]
+    C --> D[Compile a campaign per side]
     D --> E[Execute on LLJIT]
-    E --> F[Compare outcome sets]
+    E --> F[Compare outcome distributions]
 ```
 
 1. Parse the input module and clone it.
 2. Apply one or more seeded, semantics-preserving transforms from the
    registry to the clone.
 3. Lower both modules to LLVM IR.
-4. Agitate clones and execute both sides on LLJIT.
-5. Compare the observed outcome sets.
+4. Collect independent campaigns for both sides on LLJIT.
+5. Compare the observed outcome distributions and report a verdict.
 
 ## Features
 
 - 20+ seeded metamorphic transformations (see [Transforms](#transforms)).
-- A statistical oracle over equality/subset/superset relations (see [Oracle](#oracle)).
-- An agitation sweep across codegen and runtime parameters (see [Agitation sweep](#agitation-sweep)).
+- A distributional oracle over equality/subset/superset relations (see [Oracle](#oracle)).
 - Structured campaign output with per-run JSON reports and artifacts (see [Output layout](#output-layout)).
 - Campaign checkpointing and resuming, so an interrupted campaign can be continued via `--campaign-dir`.
 - Python runner and over 30+ litmus-style seeds in `./fuzzing/corpus/seeds`.
@@ -162,16 +160,23 @@ The binary prints the campaign directory on stdout and accepts the same options 
 | --- | --- |
 | `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `compare` (default `compare`) |
 | `--model` | memory model gate: empty = generic transforms only, `armv8` adds ARMv8-specific ones |
-| `--reps` | executions per program per thread count (default 5000) |
+| `--reps` | executions per file in `execution` mode, transform picks in `emit` mode (default 5000) |
 | `--iter` | number of pipeline repetitions (default 1) |
 | `--transform` | restrict the transform set (repeat or comma-separate) |
 | `--apply` | max transform applications per run |
 | `--multi` | pick a random `.mlir` file from a folder per run |
 | `--seed` | fixed RNG seed |
 | `--campaign-dir` | resume/continue a campaign, or the emit-mode output directory |
-| `--threshold` | novelty threshold, 0–100 (default 5) |
-| `--reruns` | replay-round budget (default 5000) |
-| `--max-runs` | hard cap for source runs per baseline (default 100000) |
+| `--campaigns` | campaigns collected per variant before the first verdict, and the size of each later batch (default 10) |
+| `--max-campaigns` | campaign cap while a verdict stays inconclusive (default 50, a rerun budget of 100,000 executions per variant) |
+| `--executions-per-campaign` | executions per campaign (default 2000) |
+| `--team-size` | OpenMP team size, identical for both variants (default 4) |
+| `--tvd-threshold` | tolerated distributional discrepancy (default 0.05) |
+| `--bootstrap` | campaign-level bootstrap replicates (default 2000) |
+| `--confidence` | confidence level of the interval (default 0.95) |
+| `--threshold` | share of runs a support violation must reach to fail a run, 0–100 (default 5) |
+| `--reruns` | legacy replay-round budget (default 5000) |
+| `--max-runs` | legacy replay cap for source runs per baseline (default 100000) |
 | `--no-cache` | disable the persistent on-disk cache |
 
 See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
@@ -180,7 +185,7 @@ See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
 
 | Mode | What it does |
 | --- | --- |
-| `compare` (default) | compare source vs transformed under the agitation sweep and oracle |
+| `compare` (default) | compare the source and transformed outcome distributions under the distributional oracle |
 | `execution` | execute each file as-is; no oracle comparison, `.ll` artifacts only |
 | `emit` | apply transforms and emit the transformed MLIR only; requires `--transform` |
 | `legacy` | legacy thread-group oracle pipeline |
@@ -241,39 +246,99 @@ Each declares its target via
 `MetamorphicTransform.cpp` adds it to the applicable set only when the
 requested `--model` matches.
 
-## Agitation sweep
+## Measurement protocol
 
-The agitation sweep perturbs execution across codegen and runtime axes to widen the set of observable outcomes and surface rare interleavings.
+The `compare` mode measures a distribution, so it never perturbs the program it
+is measuring. Every campaign compiles a fresh clone at a fixed CodeGen opt level
+and runs it at one team size, so campaign-to-campaign variation comes from
+compilation and scheduling rather than from deliberately changed code layout.
 
-Each LLVM module is compiled into 5 in-memory JIT variants and run under
-`configCount` (default 5) OpenMP team-size configs.
+- **Campaigns** — `--campaigns` fresh compilations per variant (default 10), each
+  running `--executions-per-campaign` executions (default 2000), for 20,000
+  executions per variant and 40,000 in total at the default budget.
+- **Rerun budget** — an undecided comparison buys another batch of `--campaigns`
+  campaigns at a time up to `--max-campaigns` (default 50), so it may spend up to
+  100,000 executions per variant before reporting that it cannot decide. Only the
+  campaigns actually collected are compiled and executed.
+- **Runtime configuration** — one fixed team size for both variants and all
+  campaigns (`--team-size`, default 4), not a sweep.
+- **Ordering** — the two variants alternate campaign by campaign, so machine load
+  and ordering effects are not tied to one side.
+- **Determinism probe** — the first campaign also runs 32 single-thread
+  executions per side; both sides must agree on exactly one outcome or the run
+  fails.
+- **Shared state** — the OpenMP runtime settings are process-wide, and each
+  campaign creates its own JIT instance. Both are recorded in `run_info.json`
+  under `protocol.shared_state`.
+## Verdicts
 
-- **Codegen axis** — each variant clones the module and shuffles non-entry
-  basic blocks; CodeGen opt levels use all of `{0,1,2,3}`. On ELF, per-BB
-  sections preserve the shuffled layout in machine code.
-- **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
-  replacement.
-- **Replay rounds** — rare states re-run with fresh team-size mixes, without
-  recompiling.
-- **TSan triage** — when the `--max-runs` cap is reached with rare states
-  still unresolved, one TSan-instrumented binary per side runs a final
-  `--reruns` round; TSan's scheduling perturbation either surfaces the state
-  or confirms it absent before the final verdict.
+Each run reports `OK`, `WARN` or `FAIL` (written as `BAD` in the `distribution`
+block). A run fails when either of two components finds decisive evidence.
 
-## Oracle
+### Distributional comparison
 
-The oracle compares the outcome sets of source and transformed runs and issues the final verdict, using a Poisson model to judge statistical deviations.
+The observed outcomes of a campaign are normalized into an empirical
+distribution, and the two variants are compared with a relation-masked
+discrepancy in `[0, 1]`:
 
-- A single-thread probe of both sides must produce the same deterministic
-  outcome, or the run fails.
-- Outcome sets are compared under the run's relation (equality, subset,
-  superset). A state present on one side only, or a rate shift on a shared
-  state, is tested against a Poisson model of the source-side counts
-  (`p < 1e-6` flags a deviation).
-- Rare novel states are not immediately judged; replay rounds merge more data
-  before the final verdict.
-- Verdicts are `OK`, `WARN` (statistical deviation below the fail bar), or
-  `FAIL` (hard behavioural change).
+- **equality** — the total variation distance over the union of outcomes.
+- **subset** — the probability mass the transformed variant places on outcomes
+  the source never produced.
+- **superset** — the probability mass the source produced that the transformed
+  variant no longer produces.
+
+Campaigns are resampled with replacement (`--bootstrap` replicates, default
+2000) to obtain a confidence interval for that discrepancy. The verdict follows
+solely from the interval and the tolerance (`--tvd-threshold`, default 0.05):
+an interval at or below the tolerance is `OK`, one entirely above it is `FAIL`,
+and one straddling it is inconclusive, which buys another batch of campaigns.
+
+Each verdict states its reason in one line, and the verdict itself carries the
+severity, so the reason is not prefixed with it: a distributional verdict reports
+the difference as a percentage of probability, and a verdict resting on a single
+outcome names that outcome and the side that lacks it.
+
+```text
+programs differ by 0.40% of probability
+new outcome [1, 2] not found in source
+```
+
+The confidence interval, tolerance, campaign and execution counts stay in the
+`distribution` block of `run_info.json`.
+
+### Support check
+
+An outcome that only one variant produces is a candidate support violation,
+judged against a **fluke band** built from the other side's own evidence. Two
+questions set it: what can a sample this size hide, and what does that side's
+own sample suggest is hiding? For `n` executions and a `p < 1e-6` evidence bar
+the sampling bound is ~`13.8/n`; the empirical estimate comes from outcomes seen
+exactly once (`N1/N`), averaged over campaigns. The band is the larger of the
+two, so it stays a bound rather than a guess. A source full of one-off outcomes
+therefore widens its own band, and a source whose outcomes are well covered keeps
+the sampling bound.
+
+| Occurrences on the offending side | Outcome |
+| --- | --- |
+| at or below the band | ignored |
+| above it, but not yet established | more campaigns are collected, if they could still establish it |
+| established, at or above `--threshold` (5%) | `FAIL` |
+| established but below `--threshold`, or never establishable | ignored |
+
+Before buying campaigns the oracle projects the observed rate onto the budget
+still reachable and asks whether the occurrence would clear the evidence bar
+there. A candidate that could never be established is recorded and left alone
+instead of being sampled for, so a comparison that cannot be settled stops
+spending rather than running to the cap.
+
+A rare outcome that never gathers enough evidence is dropped rather than warned
+about: too rare to confirm is too rare to reason about. It stays recorded in the
+run's `support_violations`, so nothing is lost, and it does not stop the rest of
+the comparison from being `OK`.
+
+Both directions are checked under equality; subset judges only added outcomes and
+superset only dropped ones. A `FAIL` from either component is reported
+immediately with the offending outcome, so the artifacts name what changed.
 
 ## Output layout
 
@@ -281,14 +346,20 @@ A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
 
 - `source.mlir`, `transformed.mlir`, `lowered.mlir`
 - `source.ll`, `transformed.ll`
-- `run_info.json` — transform applications, per-thread/outcome-set breakdown,
-  verdict, and structured `issues` (each with `status` FAIL/WARN, `outcome`,
-  and `reason`)
+- `run_info.json` — transform applications, verdict, structured `issues` (each
+  with `status` FAIL/WARN, `outcome` and `reason`), the per-campaign
+  `binary_results` (each with its configuration seed and frequency map), a
+  `distribution` block (verdict, discrepancy, interval, campaign and support
+  counts), a `protocol` block, and the `support_violations` found.
 
-`<campaign-dir>/result.json` aggregates the per-binary results, and
-`sanitizer.log` records any TSan reports. `--mode=execution` writes
-a bare `source.ll` per run; `--mode=emit` writes `run<N>_seed<S>.mlir`
-variants.
+The `distribution` block carries the evidence behind the verdict - discrepancy,
+interval, threshold, campaigns and executions - as diagnostics; the verdict
+itself never requires reading them.
+
+`<campaign-dir>/result.json` aggregates the per-run results, and `sanitizer.log`
+records any ThreadSanitizer reports, which are reported whatever the verdict and
+whatever their frequency. `--mode=execution` writes a bare `source.ll` per run;
+`--mode=emit` writes `run<N>_seed<S>.mlir` variants.
 
 ## Testing
 
@@ -297,15 +368,24 @@ variants.
 ctest --test-dir build --output-on-failure
 ```
 
+The oracle tests cover the discrepancy arithmetic, the relation masking, the
+support-check evidence ladder, the bootstrap, the campaign budget and the
+verdict combination. Each run's `run_info.json` carries the discrepancy,
+interval, campaign counts and support sizes behind its verdict, so the same
+figures can be read straight from any campaign.
+
 ## Troubleshooting
 
 - **Apple Silicon OpenMP**: Homebrew `libomp` is auto-detected; ensure it is
   installed before configuring.
 - **Repeated re-lowering**: delete the cache dir (`cache/v2`) to force fresh
   lowering of all modules.
-- **ThreadSanitizer**: the tool and JIT'd code always run under TSan
-  (`-fsanitize=thread`); `sanitizer.log` records TSan reports from the
-  campaign run.
+- **ThreadSanitizer**: the tool is built with TSan (`-fsanitize=thread`), so
+  TSan reports surface in `sanitizer.log`; the runner classifies such a campaign
+  as an error regardless of the verdict.
+- **Everything is `WARN`**: a `WARN` means the comparison could not be decided
+  within the campaign budget. Raise `--max-campaigns`, or lower
+  `--executions-per-campaign` if the programs are slow.
 
 ## Pull requests
 
