@@ -31,7 +31,6 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 │   └── src/
 │       ├── app/               # mlir_mracle_opt CLI driver
 │       └── lib/
-│           ├── agitation/     # perturbs modules (basic-block layout) and generates runtime configs
 │           ├── backend/
 │           │   ├── jit/       # JIT-compiles LLVM modules for execution
 │           │   └── lowering/  # lowers MLIR to LLVM IR
@@ -39,7 +38,7 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 │           ├── execution/     # runs compiled binaries and collects observed outcomes
 │           ├── io/            # serializes results and dumps IR artifacts
 │           ├── legacy/        # legacy thread-group oracle pipeline (--mode=legacy)
-│           ├── oracle/        # compares outcome sets and derives verdicts
+│           ├── oracle/        # compares outcome distributions and derives verdicts
 │           ├── pipeline/      # pipeline orchestration, emit and execution modes
 │           └── passes/        # metamorphic transformation passes
 ├── fuzzing/
@@ -58,23 +57,23 @@ memory model, allowing the systematic exploration of a whole class of MLIR progr
 flowchart LR
     A[Parse MLIR and clone] --> B[Apply metamorphic transforms]
     B --> C[Lower to LLVM IR]
-    C --> D[Agitate clones]
+    C --> D[Compile a campaign per side]
     D --> E[Execute on LLJIT]
-    E --> F[Compare outcome sets]
+    E --> F[Compare outcome distributions]
 ```
 
 1. Parse the input module and clone it.
 2. Apply one or more seeded, semantics-preserving transforms from the
    registry to the clone.
 3. Lower both modules to LLVM IR.
-4. Agitate clones and execute both sides on LLJIT.
-5. Compare the observed outcome sets.
+4. Collect independent campaigns for both sides on LLJIT.
+5. Compare the observed outcome distributions and report a verdict.
 
 ## Features
 
 - 20+ seeded metamorphic transformations (see [Transforms](#transforms)).
-- A statistical oracle over equality/subset/superset relations (see [Oracle](#oracle)).
-- An agitation sweep across codegen and runtime parameters (see [Agitation sweep](#agitation-sweep)).
+- Three comparison oracles over the same campaign protocol — agitation,
+  distributional and noise-calibrated (see [Modes](#modes)).
 - Structured campaign output with per-run JSON reports and artifacts (see [Output layout](#output-layout)).
 - Campaign checkpointing and resuming, so an interrupted campaign can be continued via `--campaign-dir`.
 - Python runner and over 30+ litmus-style seeds in `./fuzzing/corpus/seeds`.
@@ -145,6 +144,10 @@ Examples:
 
 # resume an interrupted campaign
 .venv/bin/python fuzzing/fuzz_mracle.py --campaign-dir=path/to/campaign fuzzing/corpus/seeds
+
+# the distributional comparison, then the calibrated one
+.venv/bin/python fuzzing/fuzz_mracle.py --mode=tvd fuzzing/corpus/seeds/iriw.mlir
+.venv/bin/python fuzzing/fuzz_mracle.py --mode=calibrated fuzzing/corpus/seeds/iriw.mlir
 ```
 
 ### Using the binary directly
@@ -160,30 +163,28 @@ The binary prints the campaign directory on stdout and accepts the same options 
 
 | Option | Meaning |
 | --- | --- |
-| `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `compare` (default `compare`) |
+| `--mode` | pipeline mode(s), comma-separated: `emit`, `execution`, `legacy`, `compare` (default), `tvd`, `calibrated` |
 | `--model` | memory model gate: empty = generic transforms only, `armv8` adds ARMv8-specific ones |
-| `--reps` | executions per program per thread count (default 5000) |
 | `--iter` | number of pipeline repetitions (default 1) |
 | `--transform` | restrict the transform set (repeat or comma-separate) |
 | `--apply` | max transform applications per run |
 | `--multi` | pick a random `.mlir` file from a folder per run |
 | `--seed` | fixed RNG seed |
 | `--campaign-dir` | resume/continue a campaign, or the emit-mode output directory |
-| `--threshold` | novelty threshold, 0–100 (default 5) |
-| `--reruns` | replay-round budget (default 5000) |
-| `--max-runs` | hard cap for source runs per baseline (default 100000) |
 | `--no-cache` | disable the persistent on-disk cache |
+| `--reps` | `compare`, `execution`, `emit`: executions per variant configuration (default 5000), per file, or transform picks |
+| `--reruns`, `--max-runs` | `compare`, `legacy`: replay-round budget (default 5000) and the cap on executions spent on one baseline (default 100000) |
+| `--threshold` | `compare`, `legacy`: share of runs, in percent, at which a one-sided outcome stops being rare (default 5) |
+| `--campaigns` | `tvd`, `calibrated`: campaigns per variant before the first verdict, and the size of each later batch (default 10) |
+| `--max-campaigns` | `tvd`, `calibrated`: campaign cap while undecided (default 50, 30 with `calibrated`) |
+| `--executions-per-campaign` | `tvd`, `calibrated`: executions per campaign (default 2000, 1000 with `calibrated`) |
+| `--team-size` | `tvd`, `calibrated`: OpenMP team size, identical for both variants (default 4) |
+| `--tvd-threshold` | `tvd`: tolerated distributional discrepancy (default 0.05) |
+| `--min-change` | `calibrated`: smallest change worth reporting, in squared Hellinger distance (default 0.005) |
+| `--bootstrap` | `tvd`, `calibrated`: resampling replicates, for the interval and for the noise envelope (default 2000) |
+| `--confidence` | `tvd`, `calibrated`: confidence of the interval, and of the calibrated bar (default 0.95) |
 
 See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
-
-### Pipeline Modes
-
-| Mode | What it does |
-| --- | --- |
-| `compare` (default) | compare source vs transformed under the agitation sweep and oracle |
-| `execution` | execute each file as-is; no oracle comparison, `.ll` artifacts only |
-| `emit` | apply transforms and emit the transformed MLIR only; requires `--transform` |
-| `legacy` | legacy thread-group oracle pipeline |
 
 ### Environment variables
 
@@ -241,39 +242,75 @@ Each declares its target via
 `MetamorphicTransform.cpp` adds it to the applicable set only when the
 requested `--model` matches.
 
-## Agitation sweep
+## Modes
 
-The agitation sweep perturbs execution across codegen and runtime axes to widen the set of observable outcomes and surface rare interleavings.
+Every mode shares the same front half — parse, clone, apply the metamorphic
+transforms, lower and compile — and differs in what it does with the result.
+Select with `--mode`, and comma-separate to run several in one campaign.
 
-Each LLVM module is compiled into 5 in-memory JIT variants and run under
-`configCount` (default 5) OpenMP team-size configs.
+| Mode | Oracle it reports |
+| --- | --- |
+| `compare` (default) | per-outcome oracle over the agitation sweep |
+| `tvd` | distributional oracle: masked discrepancy plus a support check |
+| `calibrated` | distributional oracle: one score against a bar it calibrates itself |
+| `legacy` | thread-group oracle over cached baselines |
+| `execution`, `emit` | none: they execute or emit without comparing |
 
-- **Codegen axis** — each variant clones the module and shuffles non-entry
-  basic blocks; CodeGen opt levels use all of `{0,1,2,3}`. On ELF, per-BB
-  sections preserve the shuffled layout in machine code.
-- **Runtime axis** — team sizes are drawn from `{2,3,4,6,8}` without
-  replacement.
-- **Replay rounds** — rare states re-run with fresh team-size mixes, without
-  recompiling.
-- **TSan triage** — when the `--max-runs` cap is reached with rare states
-  still unresolved, one TSan-instrumented binary per side runs a final
-  `--reruns` round; TSan's scheduling perturbation either surfaces the state
-  or confirms it absent before the final verdict.
+### `compare` — the agitation oracle
 
-## Oracle
+Compiles five layout-shuffled, jittered variants per side at CodeGen levels
+`{0,1,2,3}`, runs them across team sizes `{2,3,4,6,8}`, replays rare states and
+finishes with a ThreadSanitizer round if one stays unresolved. Its per-outcome
+oracle fails on an arity or one-thread disagreement, fails a one-sided outcome at
+or above `--threshold` of runs and warns below it, and warns on a rate shift
+between two outcomes both sides produce. Verdicts are `OK`, `WARN` and `FAIL`.
 
-The oracle compares the outcome sets of source and transformed runs and issues the final verdict, using a Poisson model to judge statistical deviations.
+### `tvd` — the distributional oracle
 
-- A single-thread probe of both sides must produce the same deterministic
-  outcome, or the run fails.
-- Outcome sets are compared under the run's relation (equality, subset,
-  superset). A state present on one side only, or a rate shift on a shared
-  state, is tested against a Poisson model of the source-side counts
-  (`p < 1e-6` flags a deviation).
-- Rare novel states are not immediately judged; replay rounds merge more data
-  before the final verdict.
-- Verdicts are `OK`, `WARN` (statistical deviation below the fail bar), or
-  `FAIL` (hard behavioural change).
+Measures instead of perturbing: campaigns of fresh clones, compared with a
+relation-masked discrepancy — total variation under equality, mass added under
+subset, mass dropped under superset — against `--tvd-threshold` and a confidence
+interval, plus a support check for outcomes only one variant produces. The
+interval decides the distribution, a `p < 1e-6` bar decides support, and an
+undecided comparison buys more campaigns. Verdicts are `OK`, `WARN` and `FAIL`.
+
+### `calibrated` — the noise-calibrated oracle
+
+Judges the same campaigns with one score: the squared Hellinger distance
+`1 - Σ√(p·q)` between the pooled outcome distributions, which weighs a rare
+outcome's movement more than a common one's. The bar is the higher of
+`--min-change` and an envelope calibrated by reshuffling the collected campaigns
+into two groups of the observed sizes, pricing in build-to-build variability at
+no extra executions. Above the bar fails, below the floor passes, and in between
+it buys campaigns and reports `INCONCLUSIVE` at the cap; for scale, 30%→35%
+scores 0.0015 and passes, 0.75%→5% scores 0.0093 and fails.
+
+### `legacy` — the thread-group pipeline
+
+The older pipeline: each thread count (1, 2, 4, 8) is compared separately
+against cached source baselines with ThreadSanitizer builds, and the short side
+is retested up to `--max-runs`. Its oracle judges one direction at a time — a
+novel outcome under equality and subset, or a missing one under superset, fails
+at or above `--threshold` of runs, while a Poisson deviation warns.
+
+### `execution` and `emit` — without an oracle
+
+`--mode=execution` runs each input file as it is, `--reps` executions per file,
+and writes the lowered `source.ll` with no comparison. `--mode=emit` applies the
+requested transforms (`--transform` is required) and writes one transformed
+`.mlir` per run into `--campaign-dir`.
+
+## The campaign protocol
+
+`tvd` and `calibrated` share one measurement: `--campaigns` fresh compilations
+per variant, each running `--executions-per-campaign` executions at one
+`--team-size` for both sides, alternating variant by variant. The first campaign
+also runs 32 single-thread executions per side, which must agree on exactly one
+outcome or the run fails. An undecided comparison buys another batch up to
+`--max-campaigns`, and only the campaigns actually collected are compiled and
+executed. Defaults differ per method (`tvd` 10 × 2000, cap 50; `calibrated`
+10 × 1000, cap 30), and how the campaigns were collected is recorded under
+`protocol` in `run_info.json`.
 
 ## Output layout
 
@@ -281,21 +318,38 @@ A campaign is written to `<campaign-dir>/<status>/run<N>_seed<S>/`:
 
 - `source.mlir`, `transformed.mlir`, `lowered.mlir`
 - `source.ll`, `transformed.ll`
-- `run_info.json` — transform applications, per-thread/outcome-set breakdown,
-  verdict, and structured `issues` (each with `status` FAIL/WARN, `outcome`,
-  and `reason`)
+- `run_info.json` — transform applications, verdict, structured `issues` (each
+  with `status` FAIL/WARN, `outcome` and `reason`), the per-campaign
+  `binary_results` (each with its configuration seed and frequency map), and the
+  evidence block of the method that ran: under `tvd`, a `distribution` block
+  (verdict, discrepancy, interval, campaign and support counts) with the
+  `support_violations` found; under `calibrated`, a `calibration` block (score,
+  noise envelope, floor, resulting bar, campaign, run and support counts). Both
+  carry a `protocol` block describing how the campaigns were collected.
 
-`<campaign-dir>/result.json` aggregates the per-binary results, and
-`sanitizer.log` records any TSan reports. `--mode=execution` writes
-a bare `source.ll` per run; `--mode=emit` writes `run<N>_seed<S>.mlir`
-variants.
+The `distribution` block carries the evidence behind the verdict - discrepancy,
+interval, threshold, campaigns and executions - as diagnostics; the verdict
+itself never requires reading them.
+
+`<campaign-dir>/result.json` aggregates the per-run results, and `sanitizer.log`
+records any ThreadSanitizer reports, which are reported whatever the verdict and
+whatever their frequency; the `legacy` pipeline additionally persists source
+baselines in the cache so later campaigns reuse them. `--mode=execution` writes a
+bare `source.ll` per run; `--mode=emit` writes `run<N>_seed<S>.mlir` variants.
 
 ## Testing
 
 ```bash
-.venv/bin/cmake --build build --target mlir_mracle_oracle_test mlir_mracle_legacy_oracle_test -j
+.venv/bin/cmake --build build --target mlir_mracle_oracle_test mlir_mracle_calibrated_test mlir_mracle_poisson_oracle_test mlir_mracle_legacy_oracle_test -j
 ctest --test-dir build --output-on-failure
 ```
+
+One suite per oracle: `poisson_oracle_test` for `compare`, `oracle_test` for
+`tvd`, `calibrated_test` for `calibrated` and `legacy_oracle_test` for `legacy`.
+The `calibrated` suite is the validation battery for its score and bar, including
+batches that measure the false-alarm rate on known-equivalent comparisons and the
+detection rate on a rare emergence. Each run's `run_info.json` carries the
+numbers behind its verdict, so the figures can be read straight from a campaign.
 
 ## Troubleshooting
 
@@ -303,9 +357,17 @@ ctest --test-dir build --output-on-failure
   installed before configuring.
 - **Repeated re-lowering**: delete the cache dir (`cache/v2`) to force fresh
   lowering of all modules.
-- **ThreadSanitizer**: the tool and JIT'd code always run under TSan
-  (`-fsanitize=thread`); `sanitizer.log` records TSan reports from the
-  campaign run.
+- **ThreadSanitizer**: the tool is built with TSan (`-fsanitize=thread`), so
+  TSan reports surface in `sanitizer.log`; the runner classifies such a campaign
+  as an error regardless of the verdict.
+- **Everything is `WARN`**: under `tvd` and `calibrated` a `WARN` means the
+  comparison could not be decided within the campaign budget, which for
+  `calibrated` means the change sits between the practical floor and the noise
+  envelope. Raise `--max-campaigns`, lower `--executions-per-campaign` if the
+  programs are slow, or raise `--min-change` if the differences being reported
+  are not worth chasing. Under `compare` and `legacy` a `WARN` is a deviation
+  the oracle saw but would not call a failure on its own, such as a rare outcome
+  or a rate shift between outcomes both sides produce.
 
 ## Pull requests
 

@@ -22,7 +22,7 @@ ObservedOutcomeSet mergeOutcomeSets(const ObservedOutcomeSet &a,
                                     const ObservedOutcomeSet &b);
 
 // Pins the OpenMP runtime's process-wide settings
-void applyProcessSettings();
+void applyProcessSettings(int teamSize = 2);
 
 // Spreads totalRuns evenly across configs
 void distributeRuns(std::vector<AgitationConfig> &configs, int totalRuns);
@@ -56,6 +56,25 @@ struct ExecutionResult {
 
     std::string error;
 };
+
+
+// The measurement protocol of one campaign: a fixed compilation configuration
+// and a single runtime configuration, so campaigns differ only by the
+// compilation instance and the executions themselves.
+struct CampaignOptions {
+    int executionsPerCampaign = 2000;
+    int teamSize = 4;              // OpenMP team size for every execution
+    int jitOptLevel = -1;          // JIT default CodeGen level
+    int determinismProbeRuns = 32; // 1-thread probe executions, 0 disables it
+};
+
+// Compiles and runs one fresh campaign per side, appending them to exec. Sides
+// alternate, and the first campaign also carries the 1-thread probe. Returns
+// false with error set when either side fails to compile.
+bool runCampaignPair(ExecutionResult &exec, const llvm::Module &sourceModule,
+                     const llvm::Module &transformedModule, int campaignIndex,
+                     uint32_t campaignSeed, const CampaignOptions &opts,
+                     std::string &error);
 
 // Main orchestration of the execution of the source and transformed binaries
 // Includes the agitation sweep, collection of outcomes, and merging of the results into the union outcome sets

@@ -1,5 +1,7 @@
 #include "mlir-mracle/execution/execution.h"
 #include "mlir-mracle/agitation/agitation.h"
+
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "mlir-mracle/backend/jit/jit.h"
 
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -82,9 +84,11 @@ std::vector<CompiledBinary> compileBinarySet(const llvm::Module &module,
 
 } // namespace
 
-void applyProcessSettings() {
+void applyProcessSettings(int teamSize) {
     setenv("OMP_DYNAMIC", "false", 1);
-    setenv("OMP_NUM_THREADS", "2", 1);
+
+    const std::string threads = std::to_string(teamSize > 0 ? teamSize : 1);
+    setenv("OMP_NUM_THREADS", threads.c_str(), 1);
 }
 
 void distributeRuns(std::vector<AgitationConfig> &configs, int totalRuns) {
@@ -337,6 +341,87 @@ bool runTsanTriage(const llvm::Module &sourceModule,
     
     exec.total = mergeOutcomeSets(exec.sourceTotal, exec.transformedTotal);
     return true;
+}
+
+namespace {
+
+// compiles and runs one campaign per side under the fixed protocol
+bool runPair(ExecutionResult &exec, const llvm::Module &sourceModule,
+             const llvm::Module &transformedModule, int campaignIndex,
+             uint32_t campaignSeed, const CampaignOptions &opts,
+             std::string &error) {
+    error.clear();
+
+    if (opts.executionsPerCampaign <= 0 || opts.teamSize <= 0) {
+        error = "campaign executions and team size must be positive";
+        return false;
+    }
+
+    applyProcessSettings(opts.teamSize);
+
+    // sides alternate so load and ordering effects are not tied to one variant
+    const bool sourceFirst = (campaignSeed % 2u) == 0u;
+    const int sideOrder[2] = {sourceFirst ? 0 : 1, sourceFirst ? 1 : 0};
+
+    std::vector<CompiledBinary> compiled(2);
+    for (int step = 0; step < 2; ++step) {
+        const int side = sideOrder[step];
+        const llvm::Module &module = side == 0 ? sourceModule : transformedModule;
+        const std::string sideName = side == 0 ? "source" : "transformed";
+
+        std::string compileError;
+        auto fn = compileLLVMModuleToFunction(
+            llvm::CloneModule(module), &compileError, /*enableTsan=*/false,
+            opts.jitOptLevel, llvm::BasicBlockSection::None);
+        if (!fn) {
+            error = "JIT compile error (" + sideName + "): " + compileError;
+            return false;
+        }
+
+        compiled[side].identity = {sideName, campaignIndex, opts.jitOptLevel,
+                                   campaignSeed};
+        compiled[side].fn = std::move(fn);
+
+        // the first campaign also probes both sides at one thread
+        if (campaignIndex == 0 && opts.determinismProbeRuns > 0) {
+            ObservedOutcomeSet probe = collectOutcomeSet(
+                compiled[side].fn, opts.determinismProbeRuns, /*numThreads=*/1);
+            if (side == 0)
+                exec.sourceSingleThreadTotal = mergeOutcomeSets(
+                    exec.sourceSingleThreadTotal, probe);
+            else
+                exec.transformedSingleThreadTotal = mergeOutcomeSets(
+                    exec.transformedSingleThreadTotal, probe);
+        }
+
+        compiled[side].threadedTotal =
+            collectOutcomeSet(compiled[side].fn, opts.executionsPerCampaign,
+                              opts.teamSize);
+    }
+
+    for (int side = 0; side < 2; ++side) {
+        const ObservedOutcomeSet &set = compiled[side].threadedTotal;
+        if (side == 0) {
+            exec.sourceTotal = mergeOutcomeSets(exec.sourceTotal, set);
+            exec.sourceBinaries.push_back(std::move(compiled[side]));
+        } else {
+            exec.transformedTotal = mergeOutcomeSets(exec.transformedTotal, set);
+            exec.transformedBinaries.push_back(std::move(compiled[side]));
+        }
+    }
+
+    exec.total = mergeOutcomeSets(exec.sourceTotal, exec.transformedTotal);
+    return true;
+}
+
+} // namespace
+
+bool runCampaignPair(ExecutionResult &exec, const llvm::Module &sourceModule,
+                     const llvm::Module &transformedModule, int campaignIndex,
+                     uint32_t campaignSeed, const CampaignOptions &opts,
+                     std::string &error) {
+    return runPair(exec, sourceModule, transformedModule, campaignIndex,
+                   campaignSeed, opts, error);
 }
 
 } // namespace mlir_mracle

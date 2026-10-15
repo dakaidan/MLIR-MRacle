@@ -90,6 +90,11 @@ struct MetamorphicPass
         if (funcs.empty())
             return;
 
+        // zero applications leaves the clone unmodified, which is the identity
+        // comparison rather than a failure to transform anything
+        if (maxApply <= 0)
+            return;
+
         // Shuffle the functions so each one gets its own random tries
         // Each function will be attempted to be transformed up to kMaxTransformAttempts times
         // If a function is successfully transformed, the pass will exit early

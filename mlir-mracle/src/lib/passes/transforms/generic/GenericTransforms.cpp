@@ -929,7 +929,6 @@ bool tryInsertRandomMemref(func::FuncOp op, RewriterBase &rewriter,
 }
 
 // Insert random-length thread-local delay chains into a gap between shared-memory ops
-// Additionally used during agitation process for jittering
 bool tryInsertJitter(func::FuncOp op, RewriterBase &rewriter,
                      std::mt19937 &rng) {
     SmallVector<InsertPoint> gaps;
