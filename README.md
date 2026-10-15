@@ -159,10 +159,7 @@ build/mlir-mracle/src/app/mlir_mracle_opt [options] <path-to-mlir-file>
 
 The binary prints the campaign directory on stdout and accepts the same options as the Python driver.
 
-### Global options
-
-These apply whatever the mode is; each mode's own options are listed in its
-section below.
+### Options
 
 | Option | Meaning |
 | --- | --- |
@@ -175,6 +172,17 @@ section below.
 | `--seed` | fixed RNG seed |
 | `--campaign-dir` | resume/continue a campaign, or the emit-mode output directory |
 | `--no-cache` | disable the persistent on-disk cache |
+| `--reps` | `compare`, `execution`, `emit`: executions per variant configuration (default 5000), per file, or transform picks |
+| `--reruns`, `--max-runs` | `compare`, `legacy`: replay-round budget (default 5000) and the cap on executions spent on one baseline (default 100000) |
+| `--threshold` | `compare`, `legacy`: share of runs, in percent, at which a one-sided outcome stops being rare (default 5) |
+| `--campaigns` | `tvd`, `calibrated`: campaigns per variant before the first verdict, and the size of each later batch (default 10) |
+| `--max-campaigns` | `tvd`, `calibrated`: campaign cap while undecided (default 50, 30 with `calibrated`) |
+| `--executions-per-campaign` | `tvd`, `calibrated`: executions per campaign (default 2000, 1000 with `calibrated`) |
+| `--team-size` | `tvd`, `calibrated`: OpenMP team size, identical for both variants (default 4) |
+| `--tvd-threshold` | `tvd`: tolerated distributional discrepancy (default 0.05) |
+| `--min-change` | `calibrated`: smallest change worth reporting, in squared Hellinger distance (default 0.005) |
+| `--bootstrap` | `tvd`, `calibrated`: resampling replicates, for the interval and for the noise envelope (default 2000) |
+| `--confidence` | `tvd`, `calibrated`: confidence of the interval, and of the calibrated bar (default 0.95) |
 
 See `.venv/bin/python fuzzing/fuzz_mracle.py --help` for the full list.
 
@@ -236,258 +244,73 @@ requested `--model` matches.
 
 ## Modes
 
-Every mode shares the same front half — parse the input, clone it, apply the
-metamorphic transforms, lower to LLVM IR and compile the variants — and differs
-in what it does with the result. `compare`, `tvd` and `calibrated` compare the
-two variants with a different oracle; `legacy` is the older thread-group
-pipeline with its own cache and oracle; `execution` and `emit` do not compare at
-all. Select with `--mode`, and repeat or comma-separate the flag to run several
-modes in one campaign.
+Every mode shares the same front half — parse, clone, apply the metamorphic
+transforms, lower and compile — and differs in what it does with the result.
+Select with `--mode`, and comma-separate to run several in one campaign.
 
-| Mode | Oracle it reports | Section |
-| --- | --- | --- |
-| `compare` (default) | per-outcome oracle over the agitation sweep | [`compare`](#compare--the-agitation-oracle) |
-| `tvd` | distributional oracle | [`tvd`](#tvd--the-distributional-oracle) |
-| `calibrated` | noise-calibrated distributional oracle | [`calibrated`](#calibrated--the-noise-calibrated-oracle) |
-| `legacy` | thread-group oracle over cached baselines | [`legacy`](#legacy--the-thread-group-pipeline) |
-| `execution` | none: executes each file as-is | [without an oracle](#execution-and-emit--without-an-oracle) |
-| `emit` | none: emits the transformed MLIR | [without an oracle](#execution-and-emit--without-an-oracle) |
+| Mode | Oracle it reports |
+| --- | --- |
+| `compare` (default) | per-outcome oracle over the agitation sweep |
+| `tvd` | distributional oracle: masked discrepancy plus a support check |
+| `calibrated` | distributional oracle: one score against a bar it calibrates itself |
+| `legacy` | thread-group oracle over cached baselines |
+| `execution`, `emit` | none: they execute or emit without comparing |
 
 ### `compare` — the agitation oracle
 
-The default method compares the two variants as they behave under deliberate
-perturbation: each side is compiled into five in-memory JIT variants whose
-non-entry basic blocks are shuffled and whose CodeGen optimisation levels are a
-permutation of `{0,1,2,3}`, both sides are jittered, and the variants run across
-OpenMP team sizes drawn from `{2,3,4,6,8}`. A rare state sends the oracle back
-for replays with fresh team-size mixes, and when the replay cap is reached with
-a state still unresolved one ThreadSanitizer build per side runs a final round
-whose outcomes join the aggregate before the verdict.
-
-| Option | Meaning |
-| --- | --- |
-| `--reps` | executions per variant configuration (default 5000, i.e. 25,000 per side over the five configurations) |
-| `--reruns` | replay-round budget, and the size of the final TSan round (default 5000) |
-| `--max-runs` | cap on the executions spent on one baseline while a rare state is unresolved (default 100000) |
-| `--threshold` | share of runs, in percent, at which a one-sided outcome stops being rare (default 5) |
-
-The verdicts are the oracle's, `OK`, `WARN` or `FAIL`. A run fails outright on
-an arity mismatch or when the two variants disagree at one thread. An outcome
-only one variant produces fails at or above `--threshold` of runs when the
-Poisson test on the quiet side's predicted count agrees, and warns below it; the
-same holds for a value that has never appeared at that position on the other
-side. A rate shift between two outcomes both sides produce is judged on the
-Poisson test alone and warns, escalating to a failure only when the source rate
-sits below `--threshold` and the transformed rate reaches it. ThreadSanitizer
-reports are saved to `sanitizer.log` whatever the verdict.
+Compiles five layout-shuffled, jittered variants per side at CodeGen levels
+`{0,1,2,3}`, runs them across team sizes `{2,3,4,6,8}`, replays rare states and
+finishes with a ThreadSanitizer round if one stays unresolved. Its per-outcome
+oracle fails on an arity or one-thread disagreement, fails a one-sided outcome at
+or above `--threshold` of runs and warns below it, and warns on a rate shift
+between two outcomes both sides produce. Verdicts are `OK`, `WARN` and `FAIL`.
 
 ### `tvd` — the distributional oracle
 
-`--mode=tvd` compares distributions instead of perturbing them: the program it
-measures is never modified, and there is no triage. Campaigns are collected as
-described under [the campaign protocol](#the-campaign-protocol), and each
-campaign compiles a fresh clone at a fixed CodeGen optimisation level and runs
-it at one team size, so campaign-to-campaign variation comes from compilation
-and scheduling rather than from deliberately changed code layout.
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--campaigns` | 10 | campaigns per variant before the first verdict, and the size of each later batch |
-| `--max-campaigns` | 50 | campaign cap while the comparison stays undecided (100,000 executions per variant) |
-| `--executions-per-campaign` | 2000 | executions per campaign |
-| `--team-size` | 4 | OpenMP team size, identical for both variants |
-| `--tvd-threshold` | 0.05 | tolerated distributional discrepancy |
-| `--bootstrap` | 2000 | campaign-level bootstrap replicates |
-| `--confidence` | 0.95 | confidence level of the interval |
-
-The agitation options (`--reps`, `--reruns`, `--max-runs`, `--threshold`) are
-rejected here, because this method measures campaigns rather than executions.
-
-Each run reports `OK`, `WARN` or `FAIL`, and fails when either of its two
-components finds decisive evidence.
-
-**Distributional comparison.** The observed outcomes of a campaign are
-normalized into an empirical distribution, and the two variants are compared
-with a relation-masked discrepancy in `[0, 1]`:
-
-- **equality** — the total variation distance over the union of outcomes.
-- **subset** — the probability mass the transformed variant places on outcomes
-  the source never produced.
-- **superset** — the probability mass the source produced that the transformed
-  variant no longer produces.
-
-Campaigns are resampled with replacement (`--bootstrap` replicates) to obtain a
-confidence interval for that discrepancy, and the verdict follows solely from
-the interval and the tolerance: an interval at or below the tolerance is `OK`,
-one entirely above it is `FAIL`, and one straddling it is undecided, which buys
-another batch of campaigns and becomes a `WARN` if the cap is reached.
-
-**Support check.** An outcome that one variant produces and the other does not
-*meaningfully* produce is a categorical violation: the other side's count must
-exceed its own fluke band before the outcome counts as present there. That covers
-0 → 300 and 1 → 300 alike, since a single occurrence is not evidence of
-meaningful production. The band is built from the quiet side's own evidence and
-two questions set it: what can a sample this size hide, and what does that side's
-own sample suggest is hiding? For `n` executions and a `p < 1e-6` evidence bar
-the sampling bound is ~`13.8/n`; the empirical estimate comes from outcomes seen
-exactly once (`N1/N`), averaged over campaigns. The band is the larger of the
-two, so it stays a bound rather than a guess.
-
-| Occurrences on the offending side | Outcome |
-| --- | --- |
-| at or below the band | ignored |
-| unlikely under the other variant's sampling (`p < 0.05`) | `WARN`, however rare |
-| established (`p < 1e-6`) | `FAIL` |
-| above the band but pointing nowhere yet | more campaigns are collected, if they could still establish it |
-| never establishable | recorded, does not keep the run open |
-
-The counts are budget-independent because the band tightens with the sample: 21
-occurrences start warning and 36 establish a failure at any budget, which is
-0.105%/0.18% of runs at 20,000 per side and 0.021%/0.036% at 100,000. Before
-buying campaigns the oracle projects the observed rate onto the budget still
-reachable and asks whether the occurrence would clear the evidence bar there. A
-rare outcome that never gathers enough evidence is recorded in
-`support_violations` rather than warned about, so it does not stop the rest of
-the comparison from being `OK`.
-
-Both components are masked by the relation: equality judges both directions,
-subset only added outcomes and superset only dropped ones. A `FAIL` is reported
-immediately with the offending outcome, so the artifacts name what changed, and
-each verdict states its reason in one line with the severity carried separately.
+Measures instead of perturbing: campaigns of fresh clones, compared with a
+relation-masked discrepancy — total variation under equality, mass added under
+subset, mass dropped under superset — against `--tvd-threshold` and a confidence
+interval, plus a support check for outcomes only one variant produces. The
+interval decides the distribution, a `p < 1e-6` bar decides support, and an
+undecided comparison buys more campaigns. Verdicts are `OK`, `WARN` and `FAIL`.
 
 ### `calibrated` — the noise-calibrated oracle
 
-`--mode=calibrated` judges the same campaign protocol as `tvd` with a single
-distributional score and a bar it measures from the campaigns themselves. It has
-no per-outcome guards, no support check and no fixed percentage cutoff: a change
-is reported when it exceeds both the variability this comparison actually showed
-and a minimum practical change.
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--campaigns` | 10 | campaigns per variant before the first verdict, and the size of each later batch |
-| `--max-campaigns` | 30 | campaign cap while the comparison stays undecided (30,000 executions per variant) |
-| `--executions-per-campaign` | 1000 | executions per campaign |
-| `--team-size` | 4 | OpenMP team size, identical for both variants |
-| `--min-change` | 0.005 | smallest change worth reporting, in squared Hellinger distance |
-| `--bootstrap` | 2000 | resamples that build the noise envelope |
-| `--confidence` | 0.95 | confidence of the calibrated bar |
-
-**The score.** Both variants are pooled into normalized distributions over the
-complete joint outcomes, and the distance between them is the squared Hellinger
-distance `1 - Σ √(p·q)` over the union of outcomes they produced. Zero counts
-need no pseudocount, and the score is proportional: an outcome's own probability
-decides how much its movement weighs, so rare-outcome changes dominate common
-ones at the same budget.
-
-| Change | Score |
-| --- | --- |
-| identical pooled distributions | 0.0000 |
-| 70% / 30% → 67.5% / 32.5% | 0.0004 |
-| 70% / 30% → 65% / 35% | 0.0014 |
-| a new outcome at 0.5% of runs | 0.0027 |
-| 0.75% → 3% on a rare outcome | 0.0038 |
-| 70% / 30% → 60% / 40% | 0.0055 |
-| 0.75% → 5% on a rare outcome | 0.0096 |
-| 70% / 30% → 50% / 50% | 0.0211 |
-| a new outcome at 10% of runs | 0.0513 |
-| two variants that share no outcome at all | 1.0000 |
-
-The floor of 0.005 therefore sits between a rare outcome growing to 3% of runs
-and one growing to 5%, and between a common outcome moving 7 and 10 points. It
-is the single sensitivity knob: raise it to stop chasing small differences, lower
-it to report them, and read the `calibration` block to see whether the bar came
-from the floor or from the noise envelope.
-
-**The noise envelope.** The bar is calibrated from the data rather than assumed:
-the campaigns of both sides are reshuffled into two groups of the sizes actually
-collected (`--bootstrap` resamples), each reshuffle is scored the same way, and
-the bar is the high quantile of those scores at this budget. Compilation and
-scheduling variability are therefore inside the bar, because each campaign is
-its own build. The comparison refuses to decide below `--min-change` whatever
-the envelope says.
-
-Calibration costs time in the oracle and no executions at all, and it is what
-makes a single cutoff unnecessary: the size a score reaches by chance depends on
-how many executions were spent, how many outcomes exist and how much a program's
-own distribution moves between builds, so the same change is a large score on a
-quiet program and a small one on a noisy program. Measured on the seeds in this
-repository at 10 campaigns per side, the envelope is 0.0000 for a deterministic
-program and 0.0035-0.0090 for the racy ones - above the floor, so there the
-calibrated bar is what decides. The envelope shrinks as campaigns accumulate
-(0.00031, 0.00017, 0.00010 at 10, 20 and 30 campaigns), so an undecided
-comparison becomes decidable by collecting more evidence rather than by moving a
-constant.
-
-**The decision.** A score above the bar fails; a score below the practical floor
-passes; a score between the two is undecided, and the comparison buys more
-campaigns while the budget allows. The false-alarm budget is shared across the
-judgements the budget permits, so repeated looks do not turn noise into
-findings, and a comparison that reaches the cap still undecided is reported as
-`INCONCLUSIVE` (a `WARN` on the run) rather than as equivalence.
-
-The comparison is symmetric: it measures how far apart the two pooled
-distributions are, and does not use the transform relation to excuse a
-difference in either direction.
-
-The evidence behind a verdict — score, envelope, floor, the resulting bar,
-campaign and outcome counts — is written to the `calibration` block of
-`run_info.json` for debugging; the verdict itself needs none of it.
+Judges the same campaigns with one score: the squared Hellinger distance
+`1 - Σ√(p·q)` between the pooled outcome distributions, which weighs a rare
+outcome's movement more than a common one's. The bar is the higher of
+`--min-change` and an envelope calibrated by reshuffling the collected campaigns
+into two groups of the observed sizes, pricing in build-to-build variability at
+no extra executions. Above the bar fails, below the floor passes, and in between
+it buys campaigns and reports `INCONCLUSIVE` at the cap; for scale, 30%→35%
+scores 0.0015 and passes, 0.75%→5% scores 0.0093 and fails.
 
 ### `legacy` — the thread-group pipeline
 
-`--mode=legacy` is the older pipeline, kept for comparison. It compares each
-thread count separately, over a fixed set of levels: 1, 2, 4 and 8 threads. The
-one-thread level is a determinism probe of 32 executions per side, and every
-multi-threaded comparison runs ThreadSanitizer-instrumented builds. The source
-side is served from an in-memory per-file memo and a persistent baseline cache
-keyed by thread count, so repeated campaigns of the same source reuse the
-baseline; whichever side is short of outcomes is retested in `--reruns` steps up
-to `--max-runs` until it is saturated. Transforms come from the ARMv8 set, and
-the options are the agitation ones: `--reps`, `--reruns`, `--max-runs` and
-`--threshold`, with the same defaults.
-
-Its oracle judges one direction at a time against the source baseline. A novel
-outcome in the equality and subset directions, or a missing one in the superset
-direction, fails at or above `--threshold` of runs, as does a shared outcome
-whose source rate sits below `--threshold` and whose transformed rate reaches
-it. A count outside the two-sided Poisson range of the source-predicted count
-warns, and an arity mismatch or a one-thread disagreement fails.
+The older pipeline: each thread count (1, 2, 4, 8) is compared separately
+against cached source baselines with ThreadSanitizer builds, and the short side
+is retested up to `--max-runs`. Its oracle judges one direction at a time — a
+novel outcome under equality and subset, or a missing one under superset, fails
+at or above `--threshold` of runs, while a Poisson deviation warns.
 
 ### `execution` and `emit` — without an oracle
 
 `--mode=execution` runs each input file as it is, `--reps` executions per file,
-and writes the lowered `source.ll` with the observed outcomes but no comparison.
-`--mode=emit` applies the requested transforms (`--transform` is required) and
-writes one transformed `.mlir` per run into `--campaign-dir`.
+and writes the lowered `source.ll` with no comparison. `--mode=emit` applies the
+requested transforms (`--transform` is required) and writes one transformed
+`.mlir` per run into `--campaign-dir`.
 
 ## The campaign protocol
 
-`tvd` and `calibrated` are the same measurement with two different judges, so the
-protocol they share is described once here.
-
-- **Campaigns** — `--campaigns` fresh compilations per variant (default 10),
-  each running `--executions-per-campaign` executions, for 20,000 executions per
-  variant and 40,000 in total under the `tvd` defaults.
-- **Rerun budget** — an undecided comparison buys another batch of `--campaigns`
-  campaigns at a time up to `--max-campaigns`, so it may spend up to the cap
-  before reporting that it cannot decide. Only the campaigns actually collected
-  are compiled and executed.
-- **Runtime configuration** — one fixed team size for both variants and all
-  campaigns (`--team-size`, default 4), not a sweep.
-- **Ordering** — the two variants alternate campaign by campaign, so machine load
-  and ordering effects are not tied to one side.
-- **Determinism probe** — the first campaign also runs 32 single-thread
-  executions per side; both sides must agree on exactly one outcome or the run
-  fails.
-- **Shared state** — the OpenMP runtime settings are process-wide, and each
-  campaign creates its own JIT instance. Both are recorded in `run_info.json`
-  under `protocol.shared_state`.
-
-Campaigns are the unit of sampling and of uncertainty for both judges: the
-comparison is never narrower than the campaign-to-campaign variation it actually
-saw, whether that variability enters through a bootstrap (`tvd`) or through the
-reshuffling that builds the calibrated bar.
+`tvd` and `calibrated` share one measurement: `--campaigns` fresh compilations
+per variant, each running `--executions-per-campaign` executions at one
+`--team-size` for both sides, alternating variant by variant. The first campaign
+also runs 32 single-thread executions per side, which must agree on exactly one
+outcome or the run fails. An undecided comparison buys another batch up to
+`--max-campaigns`, and only the campaigns actually collected are compiled and
+executed. Defaults differ per method (`tvd` 10 × 2000, cap 50; `calibrated`
+10 × 1000, cap 30), and how the campaigns were collected is recorded under
+`protocol` in `run_info.json`.
 
 ## Output layout
 
@@ -521,18 +344,12 @@ bare `source.ll` per run; `--mode=emit` writes `run<N>_seed<S>.mlir` variants.
 ctest --test-dir build --output-on-failure
 ```
 
-One suite per oracle: `poisson_oracle_test` covers the per-outcome oracle of
-`compare`, `oracle_test` covers the distributional oracle of `tvd`,
-`calibrated_test` covers the calibrated oracle, and `legacy_oracle_test` covers
-the legacy pipeline. The `tvd` suite covers the discrepancy arithmetic, the
-support-check evidence ladder, the bootstrap, the campaign budget and the verdict
-combination. The `calibrated` suite is the validation battery for its score and
-its bar: the distance arithmetic, rare emergences, unseen outcomes and singleton
-collections, common-outcome changes, unequal budgets, campaign-to-campaign
-variability, the undecided rule, and two batches that measure the false-alarm
-rate on known-equivalent comparisons and the detection rate on a rare emergence.
-Each run's `run_info.json` carries the numbers behind its verdict, so the same
-figures can be read straight from any campaign.
+One suite per oracle: `poisson_oracle_test` for `compare`, `oracle_test` for
+`tvd`, `calibrated_test` for `calibrated` and `legacy_oracle_test` for `legacy`.
+The `calibrated` suite is the validation battery for its score and bar, including
+batches that measure the false-alarm rate on known-equivalent comparisons and the
+detection rate on a rare emergence. Each run's `run_info.json` carries the
+numbers behind its verdict, so the figures can be read straight from a campaign.
 
 ## Troubleshooting
 
