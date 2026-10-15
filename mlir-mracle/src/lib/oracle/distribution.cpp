@@ -12,6 +12,14 @@ namespace {
 // legacy judges use, so both oracles treat "clearly established" alike
 constexpr double kEvidencePValue = 1e-6;
 
+// anything less likely than this under the other variant's own sampling is
+// reported, even when it is too rare to call a failure
+constexpr double kWarnPValue = 0.05;
+
+// relative change at which an outcome is recorded even when its mass shift is
+// immaterial; reporting only, it can never make an outcome a violation
+constexpr double kRecordedFold = 2.0;
+
 // adds one campaign's normalized counts into a profile
 void accumulateProfile(OutcomeDistribution &profile, const CampaignRecord &campaign) {
     if (!campaign.usable || campaign.validRuns <= 0)
@@ -123,13 +131,16 @@ bool establishableIfSampled(const SupportViolation &violation, int64_t ownRuns,
                     std::log1p(-projectedRate)) < kEvidencePValue;
 }
 
-// evidence ladder shared by both directions
+// Evidence ladder shared by both directions. A support change is categorical: an
+// outcome one variant can produce and the other cannot is a change in kind, so
+// the decision rests on whether that is established, not on how common it is.
+// Rate movements inside a shared support are the distributional component's job.
 SupportVerdict classifyViolation(const SupportViolation &violation,
-                                 int thresholdPct, double expectedNoise) {
-    if (violation.significant && violation.rate * 100.0 >= thresholdPct)
+                                 double expectedNoise) {
+    if (violation.pValue < kEvidencePValue)
         return SupportVerdict::Fail;
-    if (violation.significant)
-        return SupportVerdict::Candidate;
+    if (violation.pValue < kWarnPValue)
+        return SupportVerdict::Warn;
     // a count inside the band the other side's resolution explains is a fluke
     if (static_cast<double>(violation.count) > expectedNoise)
         return SupportVerdict::Candidate;
@@ -335,10 +346,14 @@ DistributionResult compareDistributions(
     result.ciLow = percentile(replicates, tail);
     result.ciHigh = percentile(replicates, 1.0 - tail);
 
-    if (result.ciHigh <= opts.tvdThreshold)
+    // an interval that lands exactly on the tolerance counts as inside it;
+    // the epsilon keeps that from flapping on floating-point rounding
+    const double tolerance =
+        opts.tvdThreshold * (1.0 + 1e-9) + 1e-12;
+    if (result.ciHigh <= tolerance)
         result.verdict = DistributionVerdict::Ok;
-    else if (result.ciLow > opts.tvdThreshold)
-        result.verdict = DistributionVerdict::Bad;
+    else if (result.ciLow > tolerance)
+        result.verdict = DistributionVerdict::Fail;
     else
         result.verdict = DistributionVerdict::Inconclusive;
 
@@ -364,66 +379,104 @@ std::vector<SupportViolation> checkSupport(
     const bool judgeMissing = relation == OutcomeRelation::Equality ||
                               relation == OutcomeRelation::Superset;
 
-    if (judgeNovel) {
-        // The source never produced these outcomes. Whether that is sampling or
-        // a real absence depends on both bounds: how much a sample this size can
-        // hide, and how much the source's own singletons suggest is hiding.
-        const double sourceUnseenMass = unseenMassRate(source);
-        const double band = flukeBand(sourceRuns, sourceUnseenMass);
-        const double expectedNoise = band * static_cast<double>(transformedRuns);
-        for (const auto &outcome :
-             exclusiveOutcomes(transformedProfile, sourceProfile)) {
-            SupportViolation violation;
-            violation.outcome = outcome;
-            violation.transformedOnly = true;
-            violation.count = campaignCount(transformed, outcome);
-            violation.runs = transformedRuns;
-            violation.rate = static_cast<double>(violation.count) /
-                             static_cast<double>(transformedRuns);
-            violation.bandRate = band;
-            violation.significant =
-                binomialUpperTail(violation.count, transformedRuns, band) <
-                kEvidencePValue;
-            violation.establishable = establishableIfSampled(
-                violation, transformedRuns, sourceRuns, sourceUnseenMass,
-                opts.maxRunsPerSide);
-            violation.verdict =
-                classifyViolation(violation, opts.thresholdPct, expectedNoise);
-            violations.push_back(std::move(violation));
-        }
-    }
+    // Each side's own fluke band bounds the rate its sample cannot rule out. A
+    // count at or below that bound is not evidence that the side produces the
+    // outcome at any meaningful rate, so it counts as absent for this claim —
+    // which is what extends the check from "never appeared" to "never appeared
+    // meaningfully" (0 -> 300 and 1 -> 300 are both categorical changes).
+    const double sourceUnseenMass = unseenMassRate(source);
+    const double sourceBand = flukeBand(sourceRuns, sourceUnseenMass);
+    const double transformedBand = flukeBand(transformedRuns, 0.0);
+    const double sourceQuietLimit = sourceBand * static_cast<double>(sourceRuns);
+    const double transformedQuietLimit =
+        transformedBand * static_cast<double>(transformedRuns);
 
-    if (judgeMissing) {
-        // A source outcome the transformed side never produced is a question
-        // about the transformed side's sampling alone: the outcome is known to
-        // exist, so no unseen-mass correction applies to it.
-        const double band = flukeBand(transformedRuns, 0.0);
-        const double expectedNoise = band * static_cast<double>(sourceRuns);
-        for (const auto &outcome :
-             exclusiveOutcomes(sourceProfile, transformedProfile)) {
+    std::vector<JointOutcome> outcomes;
+    for (const auto &entry : sourceProfile)
+        outcomes.push_back(entry.first);
+    for (const auto &entry : transformedProfile)
+        if (!sourceProfile.count(entry.first))
+            outcomes.push_back(entry.first);
+
+    for (const auto &outcome : outcomes) {
+        const int64_t sourceCount = campaignCount(source, outcome);
+        const int64_t transformedCount = campaignCount(transformed, outcome);
+        const bool sourceQuiet = static_cast<double>(sourceCount) <= sourceQuietLimit;
+        const bool transformedQuiet =
+            static_cast<double>(transformedCount) <= transformedQuietLimit;
+
+        // both quiet: nothing to say. Neither quiet: the outcome exists on both
+        // sides and only its rate moved, which is the distributional component's
+        // judgement, not this one.
+        if (sourceQuiet == transformedQuiet)
+            continue;
+
+        if (transformedQuiet) {
+            if (!judgeMissing)
+                continue;
             SupportViolation violation;
             violation.outcome = outcome;
             violation.transformedOnly = false;
-            violation.count = campaignCount(source, outcome);
+            violation.count = sourceCount;
             violation.runs = sourceRuns;
-            violation.rate = static_cast<double>(violation.count) /
+            violation.rate = static_cast<double>(sourceCount) /
                              static_cast<double>(sourceRuns);
-            violation.bandRate = band;
-            // the transformed side produced none of them, which is binomial
-            // evidence against a rate this high
-            violation.significant =
-                std::exp(static_cast<double>(transformedRuns) *
-                         std::log1p(-violation.rate)) < kEvidencePValue;
-            violation.establishable = establishableIfSampled(
-                violation, sourceRuns, transformedRuns, /*otherUnseenMass=*/0.0,
-                opts.maxRunsPerSide);
-            violation.verdict =
-                classifyViolation(violation, opts.thresholdPct, expectedNoise);
+            violation.bandRate = transformedBand;
+            // the transformed side produced none worth counting, which is
+            // binomial evidence against a source rate this high
+            violation.pValue = std::exp(static_cast<double>(transformedRuns) *
+                                        std::log1p(-violation.rate));
+            violation.significant = violation.pValue < kEvidencePValue;
+            violation.establishable =
+                establishableIfSampled(violation, sourceRuns, transformedRuns,
+                                       /*otherUnseenMass=*/0.0,
+                                       opts.maxRunsPerSide);
+            violation.verdict = classifyViolation(
+                violation, transformedBand * static_cast<double>(sourceRuns));
             violations.push_back(std::move(violation));
+            continue;
         }
+
+        if (!judgeNovel)
+            continue;
+        SupportViolation violation;
+        violation.outcome = outcome;
+        violation.transformedOnly = true;
+        violation.count = transformedCount;
+        violation.runs = transformedRuns;
+        violation.rate = static_cast<double>(transformedCount) /
+                         static_cast<double>(transformedRuns);
+        violation.bandRate = sourceBand;
+        violation.pValue =
+            binomialUpperTail(transformedCount, transformedRuns, sourceBand);
+        violation.significant = violation.pValue < kEvidencePValue;
+        violation.establishable = establishableIfSampled(
+            violation, transformedRuns, sourceRuns, sourceUnseenMass,
+            opts.maxRunsPerSide);
+        violation.verdict = classifyViolation(
+            violation, sourceBand * static_cast<double>(transformedRuns));
+        violations.push_back(std::move(violation));
     }
 
     return violations;
 }
+
+namespace {
+
+// pooled occurrence counts of every outcome a variant produced
+std::map<JointOutcome, int64_t> pooledCounts(
+    const std::vector<CampaignRecord> &campaigns) {
+    std::map<JointOutcome, int64_t> counts;
+    for (const auto &campaign : campaigns) {
+        if (!campaign.usable || campaign.validRuns <= 0)
+            continue;
+        for (size_t i = 0; i < campaign.outcomes.size(); ++i)
+            counts[campaign.outcomes[i]] +=
+                i < campaign.counts.size() ? campaign.counts[i] : 0;
+    }
+    return counts;
+}
+
+} // namespace
 
 } // namespace mlir_mracle

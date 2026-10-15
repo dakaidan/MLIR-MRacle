@@ -33,8 +33,8 @@ struct BinaryOutcomeSummary {
 
 // Verdict of the distributional oracle and the protocol that produced it
 struct DistributionSummary {
-    std::string verdict;    // reported verdict: "OK" | "BAD" | "WARN"
-    std::string tvdVerdict; // distributional component alone: "OK" | "BAD" | "INCONCLUSIVE"
+    std::string verdict;    // reported verdict: "OK" | "FAIL" | "WARN"
+    std::string tvdVerdict; // distributional component alone: "OK" | "FAIL" | "INCONCLUSIVE"
     double tvd = 0.0;
     double ciLow = 0.0;
     double ciHigh = 0.0;
@@ -59,6 +59,31 @@ struct DistributionSummary {
     int jitOptLevel = -1;
 };
 
+// Verdict of the noise-calibrated comparison and the evidence behind it; the
+// numbers are diagnostics for debugging, the verdict is the interface
+struct CalibrationSummary {
+    std::string verdict;         // "OK" | "FAIL" | "INCONCLUSIVE"
+    double score = 0.0;          // squared Hellinger distance of the pooled distributions
+    double noiseThreshold = 0.0; // calibrated envelope of ordinary variability
+    double minChange = 0.0;      // practical floor
+    double decisionThreshold = 0.0;
+    double pValue = 1.0;
+    int permutations = 0;
+    int64_t sourceCampaigns = 0;
+    int64_t transformedCampaigns = 0;
+    int64_t sourceRuns = 0;
+    int64_t transformedRuns = 0;
+    int64_t sourceSupport = 0;
+    int64_t transformedSupport = 0;
+    int64_t sourceOnly = 0;
+    int64_t transformedOnly = 0;
+
+    // measurement protocol, recorded so a run can be reproduced
+    int executionsPerCampaign = 0;
+    int teamSize = 0;
+    int jitOptLevel = -1;
+};
+
 // An outcome only one variant produced, with the evidence gathered for it
 struct SupportViolationSummary {
     std::string outcome;      // rendered joint outcome, e.g. "[1, 2]"
@@ -67,6 +92,7 @@ struct SupportViolationSummary {
     int64_t runs = 0;
     double rate = 0.0;
     double bandRate = 0.0;    // fluke band the outcome was judged against
+    double pValue = 1.0;      // chance of this occurrence under the other side's sampling
     bool significant = false;
     bool establishable = true;
     std::string verdict;      // "FAIL" | "CANDIDATE" | "OK"
@@ -103,6 +129,9 @@ struct RunInfo {
     // pipelines that do not compare distributions
     DistributionSummary distribution;
     std::vector<SupportViolationSummary> supportViolations;
+
+    // verdict of the noise-calibrated comparison; empty for the other methods
+    CalibrationSummary calibration;
     
     // artifacts captured during the run;
     std::string sourceMLIR;

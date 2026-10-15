@@ -96,14 +96,16 @@ def main():
     parser.add_argument(
         "--mode", default="compare",
         help="pipeline mode(s) to run, comma-separated: emit, execution, "
-             "legacy, compare (default: compare)"
+             "legacy, compare, tvd, calibrated (default: compare; tvd and "
+             "calibrated are compare with an alternative comparison method)"
     )
     parser.add_argument(
         "--reps", type=int, default=5000,
-        help="with --mode=emit: number of times transformations are picked "
-             "and applied; with --mode=execution: executions per file (default "
-             "5000). Compare mode measures campaigns instead, so it rejects "
-             "this flag: use --executions-per-campaign."
+        help="executions per program per thread count for the default agitation "
+             "comparison; transformation picks in emit mode; executions per file "
+             "in execution mode (default 5000). The tvd comparison measures "
+             "campaigns instead, so it rejects this flag: use "
+             "--executions-per-campaign."
     )
     parser.add_argument(
         "--iter", type=int, default=1,
@@ -132,45 +134,52 @@ def main():
         help="resume/continue a campaign, or set the output directory for --mode=emit"
     )
     parser.add_argument(
-        "--campaigns", type=int, default=10,
-        help="compare: campaigns collected per variant before the first "
-             "verdict, and the size of each later batch (default 10)"
+        "--campaigns", type=int,
+        help="campaign comparisons: campaigns collected per variant before the "
+             "first verdict, and the size of each later batch (method default: "
+             "10)"
     )
     parser.add_argument(
-        "--max-campaigns", type=int, default=50,
+        "--max-campaigns", type=int,
         help="compare: cap on campaigns per variant while a verdict stays "
-             "inconclusive (default 50, i.e. a rerun budget of 100,000 "
-             "executions per variant at the default campaign size)"
+             "inconclusive (method default: 50 for tvd, 30 for calibrated)"
     )
     parser.add_argument(
-        "--executions-per-campaign", type=int, default=2000,
-        help="compare: executions per campaign (default 2000, i.e. 20,000 "
-             "executions per variant over the default 10 campaigns)"
+        "--executions-per-campaign", type=int,
+        help="campaign comparisons: executions per campaign (method default: "
+             "2000 for tvd, 1000 for calibrated)"
     )
     parser.add_argument(
-        "--team-size", type=int, default=4,
-        help="compare: OpenMP team size for every execution "
-             "(default 4)"
+        "--team-size", type=int,
+        help="campaign comparisons: OpenMP team size for every execution "
+             "(method default: 4)"
     )
     parser.add_argument(
-        "--tvd-threshold", type=float, default=0.05,
-        help="compare: tolerated distributional discrepancy "
-             "(default 0.05)"
+        "--tvd-threshold", type=float,
+        help="campaign comparisons: tolerated distributional discrepancy "
+             "(tvd only; default 0.05)"
     )
     parser.add_argument(
-        "--bootstrap", type=int, default=2000,
-        help="compare: campaign-level bootstrap replicates "
-             "(default 2000)"
+        "--min-change", type=float,
+        help="calibrated comparison: smallest distributional change worth "
+             "reporting, in squared Hellinger distance (default 0.005)"
     )
     parser.add_argument(
-        "--confidence", type=float, default=0.95,
-        help="compare: confidence level of the interval "
-             "(default 0.95)"
+        "--bootstrap", type=int,
+        help="campaign comparisons: resampling replicates, used for the tvd "
+             "interval and for the calibrated noise envelope (default 2000)"
+    )
+    parser.add_argument(
+        "--confidence", type=float,
+        help="campaign comparisons: confidence of the interval (tvd) and of "
+             "the calibrated bar (default 0.95)"
     )
     parser.add_argument(
         "--threshold", type=int, default=5,
-        help="if an outcome (both source and transformed) is missing in more than this %% of the "
-             "runs, the run is considered a failure "
+        help="agitation and legacy: if an outcome (both source and transformed) "
+             "is missing in more than this %% of the runs, the run is considered "
+             "a failure (default 5). The campaign comparisons judge the "
+             "outcome distributions themselves, so they reject this flag"
     )
     parser.add_argument(
         "--reruns", type=int, default=5000,
@@ -198,9 +207,10 @@ def main():
         name = name.strip()
         if not name:
             continue
-        if name not in ("emit", "execution", "legacy", "compare"):
+        if name not in ("emit", "execution", "legacy", "compare", "tvd",
+                        "calibrated"):
             sys.exit(f"unknown mode '{name}' (expected emit, execution, "
-                     "legacy, or compare)")
+                     "legacy, compare, tvd, or calibrated)")
         if name not in modes:
             modes.append(name)
 
@@ -221,23 +231,37 @@ def main():
     if args.seed is not None:
         cmd.append(f"--seed={args.seed}")
     cmd.append(f"--mode={','.join(modes)}")
-    distributing = "compare" in modes
-    if not distributing:
+
+    # the agitation method measures executions and gates on --threshold; the TVD
+    # method measures campaigns and rejects all of those flags
+    # tvd and calibrated are the compare pipeline with a campaign-protocol
+    # comparison, so they decide which budget flags apply
+    campaign = "tvd" in modes or "calibrated" in modes
+    if not campaign:
         cmd.append(f"--reps={args.reps}")
     cmd.append(f"--iter={args.iter}")
     cmd.append(f"--apply={args.apply}")
     cmd.append(f"--model={args.model}")
-    cmd.append(f"--threshold={args.threshold}")
-    if "legacy" in modes:
+    if not campaign:
+        cmd.append(f"--threshold={args.threshold}")
+    if not campaign:
         cmd.append(f"--reruns={args.reruns}")
         cmd.append(f"--max-runs={args.max_runs}")
-    cmd.append(f"--campaigns={args.campaigns}")
-    cmd.append(f"--max-campaigns={args.max_campaigns}")
-    cmd.append(f"--executions-per-campaign={args.executions_per_campaign}")
-    cmd.append(f"--team-size={args.team_size}")
-    cmd.append(f"--tvd-threshold={args.tvd_threshold}")
-    cmd.append(f"--bootstrap={args.bootstrap}")
-    cmd.append(f"--confidence={args.confidence}")
+    if campaign:
+        # omitted flags keep the comparison method's own defaults
+        for flag, value in (("--campaigns", args.campaigns),
+                            ("--max-campaigns", args.max_campaigns),
+                            ("--executions-per-campaign",
+                             args.executions_per_campaign),
+                            ("--team-size", args.team_size),
+                            ("--tvd-threshold",
+                             args.tvd_threshold if "tvd" in modes else None),
+                            ("--min-change",
+                             args.min_change if "calibrated" in modes else None),
+                            ("--bootstrap", args.bootstrap),
+                            ("--confidence", args.confidence)):
+            if value is not None:
+                cmd.append(f"{flag}={value}")
 
     transforms = []
     for value in args.transform:

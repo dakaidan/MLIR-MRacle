@@ -63,6 +63,12 @@ bool applyTransforms(MLIRSetup &setup, const std::string &inputFile,
                      mlir::OwningOpRef<mlir::ModuleOp> &originalModule,
                      mlir::OwningOpRef<mlir::ModuleOp> &transformedModule);
 
+// Applies the jitter transform to a module: the pass runs with the fixed
+// transform name and the run's own seed, so both sides of the comparison
+// receive the same seeded RNG stream and the jitter density stays symmetric.
+bool applyJitter(mlir::MLIRContext &ctx, mlir::ModuleOp module, int seed,
+                 std::string &error);
+
 // lowers a module to the LLVM dialect and translates it to LLVM IR,
 // capturing diagnostics in error; IR dumps are only produced when requested
 bool lowerAndTranslate(mlir::ModuleOp module, mlir::MLIRContext &mlirCtx,

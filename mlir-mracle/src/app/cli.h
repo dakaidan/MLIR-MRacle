@@ -24,6 +24,14 @@ struct CliOptions {
     bool repsExplicit = false;
     bool rerunsExplicit = false;
     bool maxRunsExplicit = false;
+    bool thresholdExplicit = false;
+    bool campaignFlagsExplicit = false;   // any campaign-protocol flag was given
+    bool executionsExplicit = false;      // --executions-per-campaign
+    bool materialityExplicit = false;     // --tvd-threshold
+    bool minChangeExplicit = false;       // --min-change
+    bool maxCampaignsExplicit = false;    // --max-campaigns
+    bool modeSelectsCalibrated = false;   // --mode=calibrated
+    bool modeSelectsTvd = false;        // --mode=tvd was given
 };
 
 // Parses and validates every binary option flag and returns a CliOptions struct

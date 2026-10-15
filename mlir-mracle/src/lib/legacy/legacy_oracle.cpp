@@ -1,5 +1,5 @@
 #include "mlir-mracle/legacy/legacy_oracle.h"
-#include "mlir-mracle/legacy/statistics.h"
+#include "mlir-mracle/oracle/statistics.h"
 
 #include <algorithm>
 #include <iterator>

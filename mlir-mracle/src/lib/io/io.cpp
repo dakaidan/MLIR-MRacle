@@ -411,6 +411,30 @@ JsonValue runInfoToStatusJson(const RunInfo &info) {
 namespace {
 
 // renders the distributional verdict and the protocol that produced it
+JsonValue calibrationToJson(const RunInfo &info) {
+    const CalibrationSummary &summary = info.calibration;
+    JsonValue obj = jsonObject();
+    jsonPut(obj, "verdict", jsonString(summary.verdict));
+    jsonPut(obj, "score", jsonDouble(summary.score));
+    jsonPut(obj, "noise_threshold", jsonDouble(summary.noiseThreshold));
+    jsonPut(obj, "min_change", jsonDouble(summary.minChange));
+    jsonPut(obj, "decision_threshold", jsonDouble(summary.decisionThreshold));
+    jsonPut(obj, "p_value", jsonDouble(summary.pValue));
+    jsonPut(obj, "permutations", jsonInt(summary.permutations));
+    jsonPut(obj, "source_campaigns", jsonInt(summary.sourceCampaigns));
+    jsonPut(obj, "transformed_campaigns", jsonInt(summary.transformedCampaigns));
+    jsonPut(obj, "source_runs", jsonInt(summary.sourceRuns));
+    jsonPut(obj, "transformed_runs", jsonInt(summary.transformedRuns));
+    jsonPut(obj, "source_support", jsonInt(summary.sourceSupport));
+    jsonPut(obj, "transformed_support", jsonInt(summary.transformedSupport));
+    jsonPut(obj, "source_only", jsonInt(summary.sourceOnly));
+    jsonPut(obj, "transformed_only", jsonInt(summary.transformedOnly));
+    jsonPut(obj, "executions_per_campaign", jsonInt(summary.executionsPerCampaign));
+    jsonPut(obj, "team_size", jsonInt(summary.teamSize));
+    jsonPut(obj, "jit_opt_level", jsonInt(summary.jitOptLevel));
+    return obj;
+}
+
 JsonValue distributionToJson(const RunInfo &info) {
     const DistributionSummary &summary = info.distribution;
     JsonValue obj = jsonObject();
@@ -457,6 +481,8 @@ JsonValue protocolToJson(const RunInfo &info) {
     return obj;
 }
 
+// renders the outcomes whose frequency changed, with the evidence behind them
+
 // renders the outcomes only one variant produced
 JsonValue supportViolationsToJson(const RunInfo &info) {
     JsonValue arr = jsonArray();
@@ -468,6 +494,7 @@ JsonValue supportViolationsToJson(const RunInfo &info) {
         jsonPut(entry, "runs", jsonInt(violation.runs));
         jsonPut(entry, "rate", jsonDouble(violation.rate));
         jsonPut(entry, "band_rate", jsonDouble(violation.bandRate));
+        jsonPut(entry, "p_value", jsonDouble(violation.pValue));
         jsonPut(entry, "significant", jsonBool(violation.significant));
         jsonPut(entry, "establishable", jsonBool(violation.establishable));
         jsonPut(entry, "verdict", jsonString(violation.verdict));
@@ -512,6 +539,10 @@ JsonValue runInfoToUnionJson(const RunInfo &info) {
             jsonPut(obj, "support_violations",
                     supportViolationsToJson(info));
     }
+
+    if (!info.calibration.verdict.empty())
+        jsonPut(obj, "calibration", calibrationToJson(info));
+
     return obj;
 }
 

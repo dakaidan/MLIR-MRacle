@@ -20,25 +20,31 @@ struct CampaignRecord {
 
 // Verdict of the distributional comparison; Inconclusive becomes WARN once the
 // campaign budget is spent.
-enum class DistributionVerdict { Ok, Bad, Inconclusive };
+enum class DistributionVerdict { Ok, Fail, Inconclusive };
 
 // Evidence state of one outcome that only a single variant produces: Ok means
 // the occurrence is inside the fluke band and is ignored, Candidate means more
-// campaigns are needed, Fail means the violation cleared both bars.
-enum class SupportVerdict { Ok, Candidate, Fail };
+// campaigns could still settle it, Warn means it is statistically unlikely to
+// come from the other variant's sampling alone, Fail means it is established.
+enum class SupportVerdict { Ok, Candidate, Warn, Fail };
 
 // Tuning for both components of the oracle
 struct DistributionOptions {
     double tvdThreshold = 0.05;  // practical tolerance, delta
     int bootstrapReplicates = 2000;
     double confidenceLevel = 0.95;
-    int thresholdPct = 5;        // share of the offending side's runs a violation must reach
     uint32_t bootstrapSeed = 0;  // deterministic resampling
 
     // Executions one side can still reach, used to tell a candidate that more
     // campaigns could establish from one they could never establish. Zero
     // disables the projection, so every candidate counts as worth pursuing.
     int64_t maxRunsPerSide = 0;
+
+    // Total false-alarm budget for the per-outcome scan, and how many judgements
+    // are planned, so re-judging after each batch of campaigns does not inflate
+    // the false-alarm rate. The per-outcome bar is alphaTotal / (outcomes * looks).
+    double alphaTotal = 0.05;
+    int plannedLooks = 1;
 };
 
 struct DistributionResult {
@@ -69,6 +75,9 @@ struct SupportViolation {
     int64_t runs = 0;            // executions on the offending side
     double rate = 0.0;
     double bandRate = 0.0;       // fluke band this outcome was judged against
+    // chance of an occurrence this large if the other variant could only produce
+    // it at the rate its own sample cannot exclude
+    double pValue = 1.0;
     bool significant = false;    // occurrence cleared the evidence bar
     // true when the campaign budget still reachable could establish this
     // outcome; a candidate that never could is not worth sampling for
