@@ -11,6 +11,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1353,6 +1354,364 @@ bool tryInsertFenceAroundSeqCst(func::FuncOp op, RewriterBase &rewriter,
     return true;
 }
 
+// Insert a fence before and after a randomly chosen atomic op that is not
+// seq_cst: around a relaxed or release/acquire op the fence adds ordering the
+// model did not require, so the transformed program allows a subset of the
+// original behaviours
+bool tryInsertFenceAroundAtomic(func::FuncOp op, RewriterBase &rewriter,
+                                std::mt19937 &rng) {
+    SmallVector<Operation *> candidates;
+    op.getBody().walk([&](Operation *innerOp) {
+        std::optional<omp::ClauseMemoryOrderKind> order;
+        if (auto write = dyn_cast<omp::AtomicWriteOp>(innerOp))
+            order = write.getMemoryOrder();
+        else if (auto read = dyn_cast<omp::AtomicReadOp>(innerOp))
+            order = read.getMemoryOrder();
+        else if (auto cmp = dyn_cast<omp::AtomicCompareOp>(innerOp))
+            order = cmp.getMemoryOrder();
+        else
+            return;
+
+        if (order.has_value() && *order != omp::ClauseMemoryOrderKind::Seq_cst)
+            candidates.push_back(innerOp);
+    });
+
+    if (candidates.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+    Operation *target = candidates[dist(rng)];
+    Location loc = op.getLoc();
+
+    rewriter.setInsertionPoint(target);
+    omp::FlushOp::create(rewriter, loc, ValueRange{});
+    rewriter.setInsertionPointAfter(target);
+    omp::FlushOp::create(rewriter, loc, ValueRange{});
+    return true;
+}
+
+// Duplicate an existing fence; a second fence orders no less than the first, so
+// only behaviours the model already allowed can disappear
+bool tryDuplicateFence(func::FuncOp op, RewriterBase &rewriter,
+                       std::mt19937 &rng) {
+    SmallVector<omp::FlushOp> fences;
+    op.getBody().walk([&](omp::FlushOp flush) { fences.push_back(flush); });
+
+    if (fences.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, fences.size() - 1);
+    omp::FlushOp target = fences[dist(rng)];
+
+    rewriter.setInsertionPointAfter(target);
+    omp::FlushOp::create(rewriter, op.getLoc(), ValueRange{});
+    return true;
+}
+
+// Insert a barrier in the body of an omp.parallel, where every thread of the
+// team reaches it; a barrier can only remove interleavings, so the transformed
+// program stays a subset of the original under every memory model
+bool tryInsertBarrier(func::FuncOp op, RewriterBase &rewriter,
+                      std::mt19937 &rng) {
+    SmallVector<omp::ParallelOp> parallels;
+    op.getBody().walk([&](omp::ParallelOp parallel) {
+        if (!parallel.getRegion().empty() &&
+            !parallel.getRegion().front().empty())
+            parallels.push_back(parallel);
+    });
+
+    if (parallels.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, parallels.size() - 1);
+    Block &body = parallels[dist(rng)].getRegion().front();
+
+    rewriter.setInsertionPoint(body.getTerminator());
+    omp::BarrierOp::create(rewriter, op.getLoc());
+    return true;
+}
+
+// Promote a store to a thread-local location into an atomic write: no other
+// thread can reach the location, so atomicity is unobservable and the program
+// is unchanged under every memory model
+bool tryAtomicPromoteLocalStore(func::FuncOp op, RewriterBase &rewriter,
+                                std::mt19937 &rng) {
+    SmallVector<memref::StoreOp> stores;
+    op.getBody().walk([&](memref::StoreOp store) {
+        if (isOpInThread(store) &&
+            isThreadLocalMemref(store.getMemref(), store))
+            stores.push_back(store);
+    });
+
+    if (stores.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, stores.size() - 1);
+    memref::StoreOp store = stores[dist(rng)];
+
+    rewriter.setInsertionPoint(store);
+    omp::AtomicWriteOp::create(rewriter, store.getLoc(), store.getMemref(),
+                               store.getValue(),
+                               /*hint=*/rewriter.getI64IntegerAttr(0),
+                               /*memory_order=*/omp::ClauseMemoryOrderKindAttr{});
+    rewriter.eraseOp(store);
+    return true;
+}
+
+// Duplicate a load of a memref that only one thread region touches: the extra
+// read observes a location no other thread can write, so nothing a model can
+// produce changes
+bool tryDuplicateLoad(func::FuncOp op, RewriterBase &rewriter,
+                      std::mt19937 &rng) {
+    llvm::DenseMap<Value, llvm::DenseSet<omp::SectionOp>> memrefToSections;
+    op.getBody().walk([&](Operation *innerOp) {
+        Value memref;
+        if (auto load = dyn_cast<memref::LoadOp>(innerOp))
+            memref = load.getMemref();
+        else if (auto store = dyn_cast<memref::StoreOp>(innerOp))
+            memref = store.getMemref();
+        else if (auto atomic = dyn_cast<omp::AtomicWriteOp>(innerOp))
+            memref = atomic.getX();
+        else
+            return;
+
+        if (auto section = innerOp->getParentOfType<omp::SectionOp>())
+            memrefToSections[memref].insert(section);
+    });
+
+    SmallVector<memref::LoadOp> candidates;
+    op.getBody().walk([&](memref::LoadOp load) {
+        auto section = load->getParentOfType<omp::SectionOp>();
+        if (!section || !isThreadLocalMemref(load.getMemref(), load))
+            return;
+
+        auto it = memrefToSections.find(load.getMemref());
+        if (it == memrefToSections.end() || it->second.size() != 1 ||
+            !it->second.contains(section))
+            return;
+
+        candidates.push_back(load);
+    });
+
+    if (candidates.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+    memref::LoadOp load = candidates[dist(rng)];
+    rewriter.setInsertionPointAfter(load);
+    rewriter.clone(*load.getOperation());
+    return true;
+}
+
+// Insert a pair of relaxed atomic reads of a memref already in scope: reads
+// only observe shared state, and relaxed order keeps them free of the ordering
+// a release or seq_cst access would add
+bool tryInsertAtomicReadPair(func::FuncOp op, RewriterBase &rewriter,
+                             std::mt19937 &rng) {
+    InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+    if (!point.op && !point.block)
+        return false;
+    setInsertPoint(rewriter, point);
+
+    Location loc = op.getLoc();
+
+    mlir::DominanceInfo domInfo(op);
+    auto dominatesPoint = [&](Operation *defOp) {
+        if (point.op)
+            return domInfo.properlyDominates(defOp, point.op);
+        return defOp->getBlock() == point.block ||
+               defOp->getParentRegion()->isAncestor(point.block->getParent());
+    };
+
+    SmallVector<Value> candidates;
+    op.getBody().walk([&](Operation *innerOp) {
+        if (!isOpInThread(innerOp) ||
+            innerOp->hasTrait<OpTrait::IsTerminator>())
+            return;
+        for (Value res : innerOp->getResults())
+            if (isa<MemRefType>(res.getType()) &&
+                dominatesPoint(res.getDefiningOp()))
+                candidates.push_back(res);
+    });
+
+    if (candidates.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+    Value target = candidates[dist(rng)];
+    auto memrefType = cast<MemRefType>(target.getType());
+    auto relaxed = omp::ClauseMemoryOrderKindAttr::get(
+        rewriter.getContext(), omp::ClauseMemoryOrderKind::Relaxed);
+
+    for (int i = 0; i < 2; ++i) {
+        Value dest = memref::AllocaOp::create(rewriter, loc, memrefType,
+                                              /*dynamicSizes=*/ValueRange{},
+                                              /*alignment=*/IntegerAttr{});
+        omp::AtomicReadOp::create(rewriter, loc, target, dest,
+                                  memrefType.getElementType(), /*hint=*/0,
+                                  relaxed);
+    }
+
+    return true;
+}
+
+// Insert a single-iteration loop around a fresh thread-local chain: the body
+// runs exactly once and touches no shared state, so the program is unchanged
+bool tryInsertSingleIterationLoop(func::FuncOp op, RewriterBase &rewriter,
+                                  std::mt19937 &rng) {
+    InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+    if (!point.op && !point.block)
+        return false;
+    setInsertPoint(rewriter, point);
+
+    Location loc = op.getLoc();
+    Value lower = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value upper = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+    scf::ForOp loop =
+        scf::ForOp::create(rewriter, loc, lower, upper, step, ValueRange{});
+    Region &region = loop.getRegion();
+    if (region.empty())
+        rewriter.createBlock(&region);
+    Block &body = region.front();
+    if (body.empty() || !body.back().hasTrait<OpTrait::IsTerminator>()) {
+        rewriter.setInsertionPointToEnd(&body);
+        scf::YieldOp::create(rewriter, loc);
+    }
+
+    rewriter.setInsertionPoint(body.getTerminator());
+    ArithGenerator(rng).generateMixed(rewriter, loc);
+    return true;
+}
+
+// Wrap a constant element index in an arith chain that computes the same index,
+// exercising index lowering without moving the address it names
+bool tryIndexArithWrapping(func::FuncOp op, RewriterBase &rewriter,
+                           std::mt19937 &rng) {
+    SmallVector<Operation *> candidates;
+    op.getBody().walk([&](Operation *innerOp) {
+        ValueRange indices;
+        if (auto load = dyn_cast<memref::LoadOp>(innerOp))
+            indices = load.getIndices();
+        else if (auto store = dyn_cast<memref::StoreOp>(innerOp))
+            indices = store.getIndices();
+        else
+            return;
+
+        if (indices.size() != 1)
+            return;
+        if (!indices.front().getDefiningOp<arith::ConstantIndexOp>())
+            return;
+
+        candidates.push_back(innerOp);
+    });
+
+    if (candidates.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+    Operation *target = candidates[dist(rng)];
+    Location loc = op.getLoc();
+
+    Value index;
+    if (auto load = dyn_cast<memref::LoadOp>(target))
+        index = load.getIndices().front();
+    else
+        index = cast<memref::StoreOp>(target).getIndices().front();
+
+    rewriter.setInsertionPoint(target);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value wrapped = arith::AddIOp::create(rewriter, loc, index, zero);
+
+    if (auto load = dyn_cast<memref::LoadOp>(target))
+        rewriter.modifyOpInPlace(load, [&] {
+            load.getIndicesMutable().assign(ValueRange{wrapped});
+        });
+    else
+        rewriter.modifyOpInPlace(target, [&] {
+            cast<memref::StoreOp>(target).getIndicesMutable().assign(
+                ValueRange{wrapped});
+        });
+
+    return true;
+}
+
+// Wrap a fresh thread-local chain in an omp.master region, which is executed by
+// one thread of the team and touches nothing another thread can read
+bool tryInsertMasterRegion(func::FuncOp op, RewriterBase &rewriter,
+                           std::mt19937 &rng) {
+    InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+    if (!point.op && !point.block)
+        return false;
+    setInsertPoint(rewriter, point);
+
+    Location loc = op.getLoc();
+    omp::MasterOp master = omp::MasterOp::create(rewriter, loc);
+    Block *body = rewriter.createBlock(&master.getRegion());
+    rewriter.setInsertionPointToStart(body);
+
+    ArithGenerator(rng).generateMixed(rewriter, loc);
+
+    rewriter.setInsertionPointToEnd(body);
+    omp::TerminatorOp::create(rewriter, loc);
+    return true;
+}
+
+// Insert a loop that never runs, so its body is lowered but never executed
+bool tryInsertZeroTripLoop(func::FuncOp op, RewriterBase &rewriter,
+                           std::mt19937 &rng) {
+    InsertPoint point = makeThreadInsertPoint(op, rewriter, rng);
+    if (!point.op && !point.block)
+        return false;
+    setInsertPoint(rewriter, point);
+
+    Location loc = op.getLoc();
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value step = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+    // lower bound == upper bound, so the body is lowered but never entered
+    scf::ForOp loop =
+        scf::ForOp::create(rewriter, loc, zero, zero, step, ValueRange{});
+    Region &region = loop.getRegion();
+    if (region.empty())
+        rewriter.createBlock(&region);
+    Block &body = region.front();
+    if (body.empty() || !body.back().hasTrait<OpTrait::IsTerminator>()) {
+        rewriter.setInsertionPointToEnd(&body);
+        scf::YieldOp::create(rewriter, loc);
+    }
+
+    rewriter.setInsertionPoint(body.getTerminator());
+    ArithGenerator(rng).generateMixed(rewriter, loc);
+    return true;
+}
+
+// Clone a side-effect-free computation in place: the duplicate's results are
+// left unused, so nothing observable depends on it
+bool tryDuplicatePureComputation(func::FuncOp op, RewriterBase &rewriter,
+                                 std::mt19937 &rng) {
+    SmallVector<Operation *> candidates;
+    op.getBody().walk([&](Operation *innerOp) {
+        if (innerOp->getNumResults() == 0 || innerOp->getNumRegions() != 0 ||
+            innerOp->getNumSuccessors() != 0 ||
+            innerOp->hasTrait<OpTrait::IsTerminator>())
+            return;
+        if (!isMemoryEffectFree(innerOp))
+            return;
+        candidates.push_back(innerOp);
+    });
+
+    if (candidates.empty())
+        return false;
+
+    std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+    Operation *target = candidates[dist(rng)];
+    rewriter.setInsertionPointAfter(target);
+    rewriter.clone(*target);
+    return true;
+}
+
 namespace {
 const FunctionTransform kGenericTransforms[] = {
     FunctionTransform("insert-fence", "generic", &tryInsertFence,
@@ -1400,6 +1759,34 @@ const FunctionTransform kGenericTransforms[] = {
                       mlir_mracle::OutcomeRelation::Equality),
     FunctionTransform("insert-critical", "generic", &tryInsertCriticalSection,
                       mlir_mracle::OutcomeRelation::Subset),
+    FunctionTransform("insert-fence-around-atomic", "generic",
+                      &tryInsertFenceAroundAtomic,
+                      mlir_mracle::OutcomeRelation::Subset),
+    FunctionTransform("duplicate-fence", "generic", &tryDuplicateFence,
+                      mlir_mracle::OutcomeRelation::Subset),
+    FunctionTransform("insert-barrier", "generic", &tryInsertBarrier,
+                      mlir_mracle::OutcomeRelation::Subset),
+    FunctionTransform("atomic-promote-local-store", "generic",
+                      &tryAtomicPromoteLocalStore,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("duplicate-load", "generic", &tryDuplicateLoad,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("insert-atomic-read-pair", "generic",
+                      &tryInsertAtomicReadPair,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("insert-single-iteration-loop", "generic",
+                      &tryInsertSingleIterationLoop,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("index-arith-wrapping", "generic",
+                      &tryIndexArithWrapping,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("insert-master-region", "generic", &tryInsertMasterRegion,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("insert-zero-trip-loop", "generic", &tryInsertZeroTripLoop,
+                      mlir_mracle::OutcomeRelation::Equality),
+    FunctionTransform("duplicate-pure-computation", "generic",
+                      &tryDuplicatePureComputation,
+                      mlir_mracle::OutcomeRelation::Equality),
 };
 } // namespace
 

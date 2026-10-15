@@ -230,6 +230,17 @@ Always available and valid under every memory model.
 | `relax-operation` | weaken atomic memory order one stage | superset |
 | `restrict-operation` | strengthen atomic memory order one stage | subset |
 | `unroll-single-thread` | unroll a single-section `omp.parallel` | equality |
+| `insert-fence-around-atomic` | `omp.flush` before and after a non-seq_cst atomic op | subset |
+| `duplicate-fence` | clone an existing `omp.flush` | subset |
+| `insert-barrier` | add `omp.barrier` to an `omp.parallel` body | subset |
+| `atomic-promote-local-store` | rewrite a thread-local store as an atomic write | equality |
+| `duplicate-load` | duplicate a load of a memref one thread region owns | equality |
+| `insert-atomic-read-pair` | two relaxed atomic reads of an in-scope memref | equality |
+| `insert-single-iteration-loop` | one-iteration `scf.for` around a fresh thread-local chain | equality |
+| `index-arith-wrapping` | wrap a constant element index in an `addi 0` chain | equality |
+| `insert-master-region` | dead thread-local chain inside a new `omp.master` region | equality |
+| `insert-zero-trip-loop` | `scf.for` with equal bounds, so the body is lowered but never entered | equality |
+| `duplicate-pure-computation` | clone a side-effect-free computation in place, results unused | equality |
 
 ### Memory-model-specific transforms
 
